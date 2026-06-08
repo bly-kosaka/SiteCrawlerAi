@@ -64,7 +64,12 @@ const SESSION_COOKIE_OPTS = {
   path: "/",
   httpOnly: true,
   secure: IS_PRODUCTION,
-  sameSite: "lax" as const,
+  // フロントエンドとAPIを別オリジン(別サブドメイン)にデプロイする構成では、
+  // SameSite=Lax だと fetch/XHR でCookieが送信されずログイン直後に401になる。
+  // SameSite=None には Secure 属性が必須(本番のみ有効)であり、CSRFはCORSの
+  // 許可オリジン一覧(originチェック)とJSON Content-Type必須(プリフライト必須)
+  // の組み合わせで防いでいるため、ここをNoneにしても新たな穴は生まれない。
+  sameSite: IS_PRODUCTION ? ("none" as const) : ("lax" as const),
   // 有効期限の真実はサーバー側セッションストア(DB)のTTLが持つ。Cookie自体の
   // Max-Ageは「ブラウザにできるだけ長く保持してもらう」ための長めの値で構わない。
   maxAge: 60 * 60 * 24 * 30, // 30日
