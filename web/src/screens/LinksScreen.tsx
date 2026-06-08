@@ -330,7 +330,7 @@ export function LinksScreen() {
       {/* right: detail */}
       <div className="lk-detail-pane">
         {selNode
-          ? <DetailPanel node={selNode} mode="stacked" allFlat={flat} onSelect={setSelected} host={host} crawlId={site?.crawl.id ?? ""} />
+          ? <DetailPanel node={selNode} mode="stacked" allFlat={flat} onSelect={setSelected} host={host} crawlId={site?.crawl.id ?? ""} startUrl={site?.crawl.startUrl ?? ""} />
           : (
             <div className="lk-empty">
               <Icon.links size={30} style={{ color: "var(--text-3)" }} />

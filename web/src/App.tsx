@@ -111,6 +111,7 @@ function AppInner() {
           ? <SitemapScreen
               treeMode={t.treeMode as "title" | "path"}
               treeBasis={t.treeBasis as "link" | "path"}
+              onTreeBasisChange={(v) => setTweak("treeBasis", v)}
               detailMode={t.detailMode as "stacked" | "compact"}
             />
           : page === "pages"
@@ -132,9 +133,6 @@ function AppInner() {
 
       <TweaksPanel>
         <TweakSection label="サイトマップ — ツリー" />
-        <TweakRadio label="ツリーの基準" value={t.treeBasis as string}
-          options={[{ value: "link", label: "リンク構造" }, { value: "path", label: "URLディレクトリ" }]}
-          onChange={(v) => setTweak("treeBasis", v)} />
         <TweakRadio label="ツリー表記" value={t.treeMode as string}
           options={[{ value: "title", label: "タイトル" }, { value: "path", label: "URLパス" }]}
           onChange={(v) => setTweak("treeMode", v)} />

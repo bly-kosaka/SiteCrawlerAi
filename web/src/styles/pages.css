@@ -58,8 +58,13 @@ table.pg tbody tr.sel:hover td { background: #e4edff; }
 tbody tr:hover .frz { background: var(--surface-2); }
 tbody tr.sel .frz { background: var(--primary-weak); }
 tbody tr.sel:hover .frz { background: #e4edff; }
-thead th.frz { z-index: 4; background: var(--surface-2); }
-thead th.frz:hover { background: var(--surface-3); }
+/* detail: ".pg thead th" 側のセレクタが table 要素を含む分だけ詳細度が高く(0,1,3 vs 0,1,2)、
+   後述の thead th.frz が後ろに書かれていても z-index: 2 に上書きされてしまっていた。
+   横スクロール時に固定列(チェックボックス/ステータス/URL)のヘッダーが
+   後続列(タイトル等)の下に隠れてしまう不具合の原因だったため、
+   table.pg を含めて詳細度を揃え、固定列が確実に上のレイヤーに来るようにする。 */
+table.pg thead th.frz { z-index: 4; background: var(--surface-2); }
+table.pg thead th.frz:hover { background: var(--surface-3); }
 .frz.shadow::after {
   content: ""; position: absolute; top: 0; right: -6px; bottom: -1px; width: 6px;
   background: linear-gradient(90deg, rgba(15,23,42,.07), transparent); pointer-events: none;

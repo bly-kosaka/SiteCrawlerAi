@@ -139,9 +139,10 @@ export interface DetailPanelProps {
   onSelect: (id: string) => void;
   host: string;
   crawlId: string;
+  startUrl: string;
 }
 
-export function DetailPanel({ node, mode, allFlat, onSelect, host, crawlId }: DetailPanelProps) {
+export function DetailPanel({ node, mode, allFlat, onSelect, host, crawlId, startUrl }: DetailPanelProps) {
   const [linkedFrom, setLinkedFrom] = React.useState<{ url: string; title: string; status: number }[]>([]);
 
   React.useEffect(() => {
@@ -161,6 +162,15 @@ export function DetailPanel({ node, mode, allFlat, onSelect, host, crawlId }: De
 
   const m = statusOf(node);
   const indexable = node.status === 200 && !node.noindex;
+
+  // クロール開始URLのスキーム(http/https)を引き継いでページの絶対URLを組み立てる
+  // (本ツールはユーザーが指定したスキームのままクロールするため、host文字列だけでは
+  //  http/httpsのどちらかが分からない。詳しくは engine.ts 参照)
+  let pageUrl = `https://${host}${node.url}`;
+  try { pageUrl = new URL(node.url, startUrl).href; } catch { /* startUrl が不正な場合はhttpsへフォールバック */ }
+
+  const copyUrl = () => { void navigator.clipboard.writeText(pageUrl); };
+  const openUrl = () => { window.open(pageUrl, "_blank", "noopener,noreferrer"); };
 
   const meta = (
     <>
@@ -195,8 +205,8 @@ export function DetailPanel({ node, mode, allFlat, onSelect, host, crawlId }: De
         <div className="dp-url mono">
           <span>{host}{node.url}</span>
           <span style={{ flex: 1 }} />
-          <button className="btn ghost icon sm" title="URLをコピー"><Icon.copy size={14} /></button>
-          <button className="btn ghost icon sm" title="開く"><Icon.external size={14} /></button>
+          <button className="btn ghost icon sm" title="URLをコピー" onClick={copyUrl}><Icon.copy size={14} /></button>
+          <button className="btn ghost icon sm" title="開く" onClick={openUrl}><Icon.external size={14} /></button>
         </div>
       </div>
 
@@ -264,10 +274,11 @@ export function DetailPanel({ node, mode, allFlat, onSelect, host, crawlId }: De
 export interface SitemapScreenProps {
   treeMode: "title" | "path";
   treeBasis: "link" | "path";
+  onTreeBasisChange: (basis: "link" | "path") => void;
   detailMode: "stacked" | "compact";
 }
 
-export function SitemapScreen({ treeMode, treeBasis, detailMode }: SitemapScreenProps) {
+export function SitemapScreen({ treeMode, treeBasis, onTreeBasisChange, detailMode }: SitemapScreenProps) {
   const { site } = useSite();
   const flat = site?.flat ?? [];
   // 「リンク構造」= クロールで発見した経路をそのまま親子関係とするツリー（site.tree）
@@ -366,6 +377,10 @@ export function SitemapScreen({ treeMode, treeBasis, detailMode }: SitemapScreen
           <span className="pane-title">サイト構造</span>
           <span className="badge muted">{matchCount}{filtering && ` / ${flat.length}`}</span>
           <div style={{ flex: 1 }} />
+          <div className="seg" title="ツリーの基準 — リンク構造: クロールで発見した経路を親子関係とする / URLディレクトリ: URLパスの上位階層を親とする">
+            <button className={treeBasis === "link" ? "on" : ""} onClick={() => onTreeBasisChange("link")}>リンク構造</button>
+            <button className={treeBasis === "path" ? "on" : ""} onClick={() => onTreeBasisChange("path")}>URLディレクトリ</button>
+          </div>
           <button className="btn ghost icon sm" title="すべて展開" onClick={expandAll}><Icon.expand size={15} /></button>
           <button className="btn ghost icon sm" title="すべて折りたたむ" onClick={collapseAll}><Icon.expand size={15} style={{ transform: "rotate(180deg)" }} /></button>
         </div>
@@ -397,7 +412,7 @@ export function SitemapScreen({ treeMode, treeBasis, detailMode }: SitemapScreen
       </div>
 
       <div className="sm-detail-pane">
-        <DetailPanel node={selNode} mode={detailMode} allFlat={flat} onSelect={selectAndReveal} host={host} crawlId={site?.crawl.id ?? ""} />
+        <DetailPanel node={selNode} mode={detailMode} allFlat={flat} onSelect={selectAndReveal} host={host} crawlId={site?.crawl.id ?? ""} startUrl={site?.crawl.startUrl ?? ""} />
       </div>
     </div>
   );
