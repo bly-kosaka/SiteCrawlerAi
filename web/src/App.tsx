@@ -82,7 +82,7 @@ function Placeholder({ page }: { page: string }) {
 function AppInner() {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
   const [page, setPage] = useHashRoute();
-  const { site, activeId, recrawl } = useSite();
+  const { site, activeId, crawls, setActiveId, recrawl } = useSite();
 
   React.useEffect(() => {
     const r = document.documentElement;
@@ -103,7 +103,9 @@ function AppInner() {
         pages={counts.pages}
         when={site?.crawl.when ?? ""}
         crawlId={site?.crawl.id ?? ""}
+        crawls={crawls}
         onRecrawl={() => activeId && recrawl(activeId)}
+        onSwitchCrawl={setActiveId}
       />
       <Sidebar page={page} onNavigate={setPage} counts={counts} health={health} />
       <main className="main">

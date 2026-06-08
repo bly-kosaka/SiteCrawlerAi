@@ -2,7 +2,9 @@
    Shell — fixed brand bar, header, sidebar navigation
    Ported from shell.jsx (window globals → module exports)
    ============================================================ */
+import React from "react";
 import { Icon } from "./icons";
+import type { CrawlSummary } from "../lib/types";
 
 export const NAV = [
   { group: "概要", items: [
@@ -46,23 +48,53 @@ interface HeaderProps {
   pages: number;
   when: string;
   crawlId: string;
+  crawls: CrawlSummary[];
   onRecrawl: () => void;
+  onSwitchCrawl: (id: string) => void;
 }
 
-export function Header({ page, host, pages, when, onRecrawl }: HeaderProps) {
+export function Header({ page, host, pages, when, crawlId, crawls, onRecrawl, onSwitchCrawl }: HeaderProps) {
   const titles: Record<string, string> = {
     dashboard: "ダッシュボード", sitemap: "サイトマップ", pages: "ページ一覧",
     links: "リンク構造", errors: "エラー", redirects: "リダイレクト", orphans: "孤立ページ", export: "エクスポート",
   };
   const showTweaks = () => window.postMessage({ type: "__activate_edit_mode" }, "*");
 
+  const [switcherOpen, setSwitcherOpen] = React.useState(false);
+
   return (
     <div className="header">
-      <button className="chip" style={{ height: 32, fontWeight: 600, color: "var(--text)" }}>
-        <span className="dot-s ok" />
-        <span className="mono" style={{ fontSize: 12.5 }}>{host}</span>
-        <Icon.chevronDown size={14} style={{ color: "var(--text-3)" }} />
-      </button>
+      <div style={{ position: "relative" }}>
+        <button className="chip" style={{ height: 32, fontWeight: 600, color: "var(--text)" }} onClick={() => setSwitcherOpen((v) => !v)}>
+          <span className="dot-s ok" />
+          <span className="mono" style={{ fontSize: 12.5 }}>{host}</span>
+          <Icon.chevronDown size={14} style={{ color: "var(--text-3)" }} />
+        </button>
+        {switcherOpen && (
+          <>
+            <div style={{ position: "fixed", inset: 0, zIndex: 40 }} onClick={() => setSwitcherOpen(false)} />
+            <div className="crawl-menu">
+              <div className="crawl-menu-h">クロール結果を切り替え</div>
+              {crawls.length
+                ? crawls.map((c) => (
+                    <button
+                      key={c.id}
+                      className={"crawl-menu-item" + (c.id === crawlId ? " active" : "")}
+                      onClick={() => { onSwitchCrawl(c.id); setSwitcherOpen(false); }}
+                    >
+                      <span className="cl-fav">{c.host[0].toUpperCase()}</span>
+                      <div className="cl-tx">
+                        <div className="cl-host">{c.host}</div>
+                        <div className="cl-meta">{c.label} ・ {c.pages} URL ・ {c.when}</div>
+                      </div>
+                      {c.id === crawlId && <Icon.check size={15} style={{ color: "var(--primary)" }} />}
+                    </button>
+                  ))
+                : <div className="crawl-menu-empty">登録済みのクロール結果がありません</div>}
+            </div>
+          </>
+        )}
+      </div>
 
       <span style={{ color: "var(--text-3)" }}>/</span>
       <span style={{ fontWeight: 600, fontSize: 13.5 }}>{titles[page]}</span>
