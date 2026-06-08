@@ -32,7 +32,27 @@ export class FastFetcher implements Fetcher {
       maxRedirections: 0,
     });
     const ttfbMs = Math.round(performance.now() - start);
-    const html = res.statusCode >= 300 && res.statusCode < 400 ? "" : await res.body.text();
+
+    // HTML以外のレスポンス（PDF・画像等のメディアファイル、WP REST APIのJSON/XML応答等）は
+    // 文字列化やcheerioでのHTML解析の対象にしない。
+    // Content-Typeを見ずに本文全体を文字列化してしまうと、
+    //   ・同一オリジンのメディアファイル（wp-content/uploads配下のPDF/画像等）を
+    //     バイナリのままUTF-8文字列として読み込みメモリを浪費する
+    //   ・JSON/XML応答（例: /wp-json/oembed/...が返すoEmbed HTMLを含むJSON）を
+    //     cheerioが緩く解析し、本来存在しないURLを<a href>として誤検出してしまい、
+    //     クロール対象URLが際限なく増殖する
+    // といった問題（WordPressサイトでクロールが完了しなくなる主要因）につながるため、
+    // Content-TypeがHTMLであることを確認できた場合のみ本文を読み込む。
+    const contentType = String(res.headers["content-type"] ?? "");
+    const isHtml = /^\s*(text\/html|application\/xhtml\+xml)\b/i.test(contentType);
+    const isRedirect = res.statusCode >= 300 && res.statusCode < 400;
+    let html = "";
+    if (isRedirect || !isHtml) {
+      await res.body.dump();
+    } else {
+      html = await res.body.text();
+    }
+
     const headers: Record<string, string> = {};
     for (const [k, v] of Object.entries(res.headers)) {
       if (typeof v === "string") headers[k.toLowerCase()] = v;

@@ -31,6 +31,30 @@ export function isRunning(id: string): boolean {
   return running.has(id);
 }
 
+// サーバー起動時に「実行中」のまま残っているクロールを「エラー」へ訂正する。
+// 通常クロールは executeCrawl の catch でエラー状態を記録するが、
+// メモリ枯渇によるプロセスクラッシュ(OOM/Aborted)のようにJSの例外として
+// 捕捉できない異常終了の場合はその記録処理自体が走らない。
+// 結果としてDB上は status: "running" のまま残り、それを完了させるプロセスも
+// 存在しないため永久に「実行中」と表示され続けてしまう。
+// この関数はプロセス起動直後(=running setが空、つまり進行中のクロールは
+// 存在し得ない時点)に呼び出すことを前提としており、その時点で running/queued の
+// クロールは前回プロセスのクラッシュによる孤児だと判断してよい。
+export async function recoverOrphanedCrawls(): Promise<void> {
+  const orphaned = await prisma.crawl.findMany({
+    where: { status: { in: ["running", "queued"] } },
+    select: { id: true },
+  });
+  if (!orphaned.length) return;
+  await prisma.crawl.updateMany({
+    where: { id: { in: orphaned.map((c) => c.id) } },
+    data: { status: "error", finishedAt: new Date() },
+  });
+  for (const { id } of orphaned) {
+    console.warn(`[crawl:${id}] 起動時に「実行中」のまま残っていたクロールを「エラー」に訂正しました(前回プロセスの異常終了による孤児と判断)`);
+  }
+}
+
 export interface StartCrawlInput {
   startUrl: string;
   maxDepth: number;

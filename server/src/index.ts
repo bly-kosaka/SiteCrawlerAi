@@ -8,6 +8,7 @@ import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
 import staticPlugin from "@fastify/static";
 import basicAuth from "@fastify/basic-auth";
+import { recoverOrphanedCrawls } from "./crawler/manager.js";
 import { registerCrawlRoutes } from "./routes/crawls.js";
 import { registerAnalysisRoutes } from "./routes/analysis.js";
 import { registerExportRoutes } from "./routes/export.js";
@@ -69,6 +70,10 @@ function safeCompare(provided: string, expected: string): boolean {
 }
 
 async function main() {
+  // 前回プロセスがクラッシュ(OOM等)した際に「実行中」のまま残ったクロールを
+  // 起動直後に「エラー」へ訂正する。詳しくは recoverOrphanedCrawls 参照。
+  await recoverOrphanedCrawls();
+
   const app = Fastify({ logger: true, trustProxy: TRUST_PROXY });
 
   await app.register(helmet, {
