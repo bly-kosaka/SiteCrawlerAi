@@ -1,0 +1,8 @@
+# プロトタイプ/ハンドオフ資料(本体は server/ と web/ へ移植済みのため対象外)
+/Site Crawler/
+/Site Crawler-handoff.zip
+/handoff_extracted/
+
+# OS
+.DS_Store
+Thumbs.db

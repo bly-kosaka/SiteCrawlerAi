@@ -1,0 +1,62 @@
+/* ============================================================
+   Errors / Orphans / Redirects 共通スタイル
+   ============================================================ */
+.il-wrap { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--surface); }
+
+.il-bar {
+  display: flex; align-items: center; gap: 12px; padding: 12px 16px;
+  border-bottom: 1px solid var(--border); flex: none;
+}
+.il-bar .il-ic { width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center; flex: none; }
+.il-bar h1 { margin: 0; font-size: 15px; font-weight: 650; letter-spacing: -.01em; }
+.il-bar .il-sub { font-size: 12px; color: var(--text-3); margin-top: 1px; }
+.il-bar .il-spacer { flex: 1; }
+
+/* breakdown chips */
+.il-chips { display: flex; gap: 7px; }
+.il-chip {
+  display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 12px;
+  border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface-2);
+  font-size: 12px; color: var(--text-2);
+}
+.il-chip b { font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.il-chip .sw { width: 8px; height: 8px; border-radius: 50%; }
+
+/* impact badge */
+.impact { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; }
+.impact .sw { width: 7px; height: 7px; border-radius: 50%; }
+.impact.high { color: var(--err); }
+.impact.mid { color: var(--warn); }
+.impact.low { color: var(--text-3); }
+
+/* search row */
+.il-tools { display: flex; gap: 8px; padding: 10px 16px; border-bottom: 1px solid var(--border); flex: none; }
+
+/* ---------- Redirect chain ---------- */
+.rc-scroll { flex: 1; overflow: auto; padding: 14px 16px 40px; }
+.rc-card {
+  display: flex; align-items: center; gap: 12px; padding: 13px 14px; margin-bottom: 10px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md);
+}
+.rc-card:hover { border-color: var(--border-strong); }
+.rc-status { flex: none; }
+.rc-flow { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; flex-wrap: wrap; }
+.rc-hop {
+  display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 11px;
+  border: 1px solid var(--border-strong); border-radius: 999px; background: var(--surface-2);
+  font-family: var(--mono); font-size: 12px; color: var(--text); max-width: 320px;
+}
+.rc-hop .u { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rc-hop.start { background: var(--warn-weak); border-color: #f4d9a8; color: #9a5b06; }
+.rc-hop.end { background: var(--ok-weak); border-color: #bfe6cc; color: #146c33; }
+.rc-hop.end.bad { background: var(--err-weak); border-color: #f3c2c2; color: #b91c1c; }
+.rc-arrow { color: var(--text-3); flex: none; display: inline-flex; }
+.rc-meta { display: flex; align-items: center; gap: 18px; flex: none; padding-left: 6px; }
+.rc-depth { text-align: center; }
+.rc-depth .v { font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.rc-depth .l { font-size: 10px; color: var(--text-3); }
+.rc-depth.warn .v { color: var(--warn); }
+
+/* empty state */
+.il-empty { flex: 1; display: grid; place-items: center; text-align: center; color: var(--text-2); }
+.il-empty .ic { width: 52px; height: 52px; border-radius: 14px; background: var(--ok-weak); color: var(--ok); display: grid; place-items: center; margin: 0 auto 14px; }

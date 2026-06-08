@@ -1,0 +1,104 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// 1回のクロール実行 = 1サイトのスナップショット
+model Crawl {
+  id         String   @id
+  host       String
+  label      String
+  startUrl   String
+  maxDepth   Int      @default(3)
+  status     String // queued | running | done | error
+  pages      Int      @default(0)
+  ok         Int      @default(0)
+  errors     Int      @default(0)
+  redirects  Int      @default(0)
+  orphans    Int      @default(0)
+  noindex    Int      @default(0)
+  dup        Int      @default(0)
+  dupH1s     Int      @default(0)
+  health     Int      @default(100)
+  truncated  Boolean  @default(false) // MAX_PAGES上限により途中で打ち切られた場合 true
+  active     Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  finishedAt DateTime?
+
+  pagesRel  Page[]
+  edges     Edge[]
+  errorsRel CrawlError[]
+
+  @@index([createdAt])
+}
+
+// クロールで発見した1 URL
+model Page {
+  crawlId    String
+  id         String
+  url        String
+  status     Int
+  title      String   @default("")
+  h1         String   @default("")
+  depth      Int      @default(0)
+  parent     String?
+  inLinks    Int      @default(0)
+  outLinks   Int      @default(0)
+  words      Int      @default(0)
+  size       Int      @default(0)
+  noindex    Boolean  @default(false)
+  canonical  String   @default("self")
+  redirectTo String?
+  ttfbMs     Int?
+  issues     String   @default("[]") // JSON-encoded string[]
+
+  crawl Crawl @relation(fields: [crawlId], references: [id], onDelete: Cascade)
+
+  @@id([crawlId, id])
+  @@index([crawlId])
+  @@index([crawlId, status])
+  @@index([crawlId, parent])
+}
+
+// 内部リンク 1本
+model Edge {
+  id      Int    @id @default(autoincrement())
+  crawlId String
+  s       String
+  t       String
+  type    String // tree | nav | footer | context | redirect
+
+  crawl Crawl @relation(fields: [crawlId], references: [id], onDelete: Cascade)
+
+  @@index([crawlId])
+  @@index([crawlId, s])
+  @@index([crawlId, t])
+}
+
+// ログインセッション。固定値署名Cookieに代えてサーバー側で永続管理することで、
+// 即時失効(ログアウト/強制失効)とTTLの強制をサーバー側の真実として扱えるようにする。
+// 単一インスタンス・小規模運用が前提のため、Redis等を追加せず既存のSQLiteで完結させる。
+model Session {
+  id         String   @id // 32バイト乱数のbase64url文字列(推測困難・連番なし)
+  createdAt  DateTime @default(now()) // 絶対期限の起点
+  lastSeenAt DateTime @default(now()) // アイドル期限の起点(認証成功のたびに更新)
+
+  @@index([lastSeenAt])
+}
+
+// クロール中に検出したリクエストエラー（接続エラー等、Pageと重複しないもの）
+model CrawlError {
+  id        Int      @id @default(autoincrement())
+  crawlId   String
+  url       String
+  message   String
+  createdAt DateTime @default(now())
+
+  crawl Crawl @relation(fields: [crawlId], references: [id], onDelete: Cascade)
+
+  @@index([crawlId])
+}

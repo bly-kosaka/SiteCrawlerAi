@@ -1,0 +1,16 @@
+node_modules
+dist
+
+# 秘密情報(API_KEY, DATABASE_URL等)を含むため、テンプレート以外はコミットしない
+.env
+.env.*
+!.env.example
+
+# SQLiteデータベース本体・WAL関連ファイル(クロール対象サイトの内部構造データを含む)
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+
+# ログ
+*.log
