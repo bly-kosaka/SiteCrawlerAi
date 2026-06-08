@@ -105,9 +105,12 @@ async function main() {
   const app = Fastify({ logger: true, trustProxy: TRUST_PROXY });
 
   await app.register(helmet, {
-    // 本APIはJSON/バイナリのみを返しHTMLを描画しないため、CSPはデフォルトで厳格化してよい
+    // 同一オリジンでSPA(index.html)も配信するため、ページ自身が発行する
+    // fetch/EventSource(/api/* への通信)を connect-src 'self' で許可する必要がある。
+    // (default-src 'none' のままだと connect-src も 'none' に倒れ、
+    //  ページ自身のAPI呼び出しまでブラウザにブロックされてしまう)
     contentSecurityPolicy: {
-      directives: { defaultSrc: ["'none'"], frameAncestors: ["'none'"] },
+      directives: { defaultSrc: ["'none'"], connectSrc: ["'self'"], frameAncestors: ["'none'"] },
     },
   });
   await app.register(cors, {
