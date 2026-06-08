@@ -38,23 +38,24 @@ model Crawl {
 
 // クロールで発見した1 URL
 model Page {
-  crawlId    String
-  id         String
-  url        String
-  status     Int
-  title      String   @default("")
-  h1         String   @default("")
-  depth      Int      @default(0)
-  parent     String?
-  inLinks    Int      @default(0)
-  outLinks   Int      @default(0)
-  words      Int      @default(0)
-  size       Int      @default(0)
-  noindex    Boolean  @default(false)
-  canonical  String   @default("self")
-  redirectTo String?
-  ttfbMs     Int?
-  issues     String   @default("[]") // JSON-encoded string[]
+  crawlId     String
+  id          String
+  url         String
+  status      Int
+  title       String   @default("")
+  h1          String   @default("")
+  description String   @default("")
+  depth       Int      @default(0)
+  parent      String?
+  inLinks     Int      @default(0)
+  outLinks    Int      @default(0)
+  words       Int      @default(0)
+  size        Int      @default(0)
+  noindex     Boolean  @default(false)
+  canonical   String   @default("self")
+  redirectTo  String?
+  ttfbMs      Int?
+  issues      String   @default("[]") // JSON-encoded string[]
 
   crawl Crawl @relation(fields: [crawlId], references: [id], onDelete: Cascade)
 

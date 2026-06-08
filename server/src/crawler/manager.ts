@@ -102,6 +102,7 @@ async function executeCrawl(id: string, opts: { startUrl: string; maxDepth: numb
             status: p.status,
             title: p.title,
             h1: p.h1,
+            description: p.description,
             depth: p.depth,
             parent: p.parent,
             inLinks: p.inLinks,

@@ -7,6 +7,7 @@ export interface PageDTO {
   status: number;
   title: string;
   h1: string;
+  description: string;
   depth: number;
   parent: string | null;
   inLinks: number;
@@ -26,6 +27,7 @@ export function toPageDTO(p: DbPage): PageDTO {
     status: p.status,
     title: p.title,
     h1: p.h1,
+    description: p.description,
     depth: p.depth,
     parent: p.parent,
     inLinks: p.inLinks,

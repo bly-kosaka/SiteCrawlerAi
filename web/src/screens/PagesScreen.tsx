@@ -32,6 +32,7 @@ const PG_COLS: PgCol[] = [
   { key: "status", label: "ステータス", w: 96, frozen: true, sortable: true, num: true },
   { key: "url", label: "URL", w: 330, frozen: true, shadow: true, sortable: true },
   { key: "title", label: "タイトル", w: 256, sortable: true },
+  { key: "description", label: "ディスクリプション", w: 320, sortable: true, optional: true },
   { key: "h1", label: "H1", w: 196, sortable: true, optional: true },
   { key: "depth", label: "階層", w: 64, center: true, num: true, sortable: true },
   { key: "inLinks", label: "被リンク", w: 84, num: true, sortable: true, optional: true },
@@ -56,6 +57,7 @@ function sortVal(n: PageNode, key: string): string | number {
     case "status": return n.status;
     case "url": return n.url;
     case "title": return n.title || "";
+    case "description": return n.description || "";
     case "h1": return n.h1 || "";
     case "depth": return n.depth;
     case "inLinks": return n.inLinks;
@@ -70,6 +72,7 @@ function downloadCSV(rows: PageNode[], host: string) {
     ["URL", (n) => n.url],
     ["ステータス", (n) => n.status],
     ["タイトル", (n) => n.title],
+    ["ディスクリプション", (n) => n.description],
     ["H1", (n) => n.h1],
     ["階層", (n) => n.depth],
     ["正規URL", (n) => n.canonical === "self" ? n.url : n.canonical],
@@ -99,6 +102,10 @@ function PgCell({ col, node }: { col: PgCol; node: PageNode }) {
     }
     case "title":
       return node.title ? <>{node.title}</> : <span className="c-muted">— 未設定 —</span>;
+    case "description":
+      return node.description
+        ? <span className="c-url" title={node.description}>{node.description}</span>
+        : <span className="c-muted">— 未設定 —</span>;
     case "h1":
       return node.h1 ? <span style={{ color: "var(--text-2)" }}>{node.h1}</span> : <span className="c-muted">—</span>;
     case "depth":
@@ -141,7 +148,7 @@ export function PagesScreen() {
 
   const pred = React.useCallback((n: PageNode) => {
     const q = query.trim().toLowerCase();
-    if (q && !((n.url + " " + n.title + " " + n.h1).toLowerCase().includes(q))) return false;
+    if (q && !((n.url + " " + n.title + " " + n.description + " " + n.h1).toLowerCase().includes(q))) return false;
     if (tab === "ok") return n.status === 200;
     if (tab === "redirect") return [301, 302].includes(n.status);
     if (tab === "error") return [404, 410, 500].includes(n.status);
@@ -234,7 +241,7 @@ export function PagesScreen() {
       <div className="pg-toolbar">
         <div className="search" style={{ width: 280 }}>
           <Icon.search size={15} />
-          <input placeholder="URL・タイトル・H1 を検索…" value={query} onChange={(e) => setQuery(e.target.value)} />
+          <input placeholder="URL・タイトル・ディスクリプション・H1 を検索…" value={query} onChange={(e) => setQuery(e.target.value)} />
           {query && <button className="btn ghost icon" style={{ width: 18, height: 18 }} onClick={() => setQuery("")}><Icon.close size={12} /></button>}
         </div>
         <div style={{ flex: 1 }} />

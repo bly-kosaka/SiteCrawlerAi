@@ -11,6 +11,7 @@ export interface ExtractedLink {
 export interface ParsedPage {
   title: string;
   h1: string;
+  description: string;
   noindex: boolean;
   canonical: string | null; // absolute URL or null
   words: number;
@@ -30,6 +31,7 @@ export function parseHtml(html: string, pageUrl: string, xRobotsTag?: string | n
 
   const title = $("title").first().text().trim();
   const h1 = $("h1").first().text().trim();
+  const description = ($('meta[name="description"]').attr("content") || "").trim();
 
   const metaRobots = ($('meta[name="robots"]').attr("content") || "").toLowerCase();
   const noindex = metaRobots.includes("noindex") || (xRobotsTag || "").toLowerCase().includes("noindex");
@@ -52,5 +54,5 @@ export function parseHtml(html: string, pageUrl: string, xRobotsTag?: string | n
     links.push({ absoluteUrl, type: classifyLinkType($el) });
   });
 
-  return { title, h1, noindex, canonical, words, sizeKb, links };
+  return { title, h1, description, noindex, canonical, words, sizeKb, links };
 }

@@ -19,6 +19,7 @@ export interface CrawledPage {
   status: number;
   title: string;
   h1: string;
+  description: string;
   depth: number;
   parent: string | null; // page id
   inLinks: number;
@@ -67,6 +68,7 @@ interface RawPageData {
   status: number;
   title: string;
   h1: string;
+  description: string;
   noindex: boolean;
   canonical: string;
   redirectTo?: string;
@@ -202,6 +204,7 @@ export async function runCrawl(
             status: 0,
             title: "",
             h1: "",
+            description: "",
             noindex: true,
             canonical: "self",
             words: 0,
@@ -242,6 +245,7 @@ export async function runCrawl(
             status: res.status,
             title: "",
             h1: "",
+            description: "",
             noindex: false,
             canonical: "self",
             redirectTo: redirectToPath,
@@ -264,6 +268,7 @@ export async function runCrawl(
             status: res.status,
             title: "",
             h1: "",
+            description: "",
             noindex: false,
             canonical: "self",
             words: 0,
@@ -297,6 +302,7 @@ export async function runCrawl(
           status: res.status,
           title: parsed.title,
           h1: parsed.h1,
+          description: parsed.description,
           noindex: parsed.noindex,
           canonical,
           words: parsed.words,
@@ -332,6 +338,7 @@ export async function runCrawl(
       status: raw.status,
       title: raw.title,
       h1: raw.h1,
+      description: raw.description,
       depth: raw.depth,
       parent: raw.parentPath ? idOf.get(raw.parentPath) ?? null : null,
       inLinks: 0,

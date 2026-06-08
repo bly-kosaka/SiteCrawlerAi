@@ -8,6 +8,7 @@ export interface PageNode {
   status: number;
   title: string;
   h1: string;
+  description: string;
   depth: number;
   parent: string | null;
   inLinks: number;
