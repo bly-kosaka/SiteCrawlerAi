@@ -1,0 +1,17 @@
+**/node_modules
+**/dist
+**/.env
+**/.env.*
+!**/.env.example
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/*.db-journal
+**/*.log
+.git
+.claude
+.agents
+.railway
+Site Crawler
+Site Crawler-handoff.zip
+handoff_extracted

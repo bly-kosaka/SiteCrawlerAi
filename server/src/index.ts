@@ -1,9 +1,12 @@
 import { timingSafeEqual } from "node:crypto";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import cookie from "@fastify/cookie";
 import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
+import staticPlugin from "@fastify/static";
 import { z } from "zod";
 import { createSession, deleteSession, validateAndTouchSession, cleanupExpiredSessions } from "./security/session.js";
 import { registerCrawlRoutes } from "./routes/crawls.js";
@@ -21,6 +24,13 @@ const IS_PRODUCTION = process.env.NODE_ENV === "production";
 // クライアントの実IPをレート制限などに反映させる必要がある。直接公開する構成では
 // 任意のクライアントが X-Forwarded-For を偽装できてしまうため、明示的にオプトインさせる。
 const TRUST_PROXY = process.env.TRUST_PROXY === "true";
+
+// フロントエンド(Viteビルド成果物)を同一オリジンから配信するための静的ファイルディレクトリ。
+// 別オリジン配信(2サービス構成)だとセッションCookieがサードパーティCookie扱いとなり、
+// ブラウザのプライバシー保護機能でブロックされてログインが維持できない問題があったため、
+// 同一オリジン配信に変更した。
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PUBLIC_DIR = path.join(__dirname, "../public");
 
 // CORS: 許可オリジンは明示的なリストで管理する（origin:true + credentials:true は
 // 「任意オリジンに資格情報付きリクエストを許可する」典型的な誤設定のため避ける）。
@@ -121,6 +131,10 @@ async function main() {
   //       追加の漏えいリスクは無い。アクセスログにも残らない)
   app.addHook("onRequest", async (req, reply) => {
     const url = new URL(req.url, "http://internal");
+    // 認証対象は /api/* のみ。フロントエンドの静的ファイル(HTML/JS/CSS)は
+    // ログイン画面自体の表示に必要なため、誰でも取得できる必要がある
+    // (機密情報を含まない公開ビルド成果物であり、保護すべきはAPI側)。
+    if (!url.pathname.startsWith("/api/")) return;
     if (PUBLIC_PATHS.has(url.pathname)) return;
 
     const sessionId = req.cookies?.[SESSION_COOKIE];
@@ -173,6 +187,16 @@ async function main() {
   await registerCrawlRoutes(app);
   await registerAnalysisRoutes(app);
   await registerExportRoutes(app);
+
+  // フロントエンド(Viteビルド成果物)を同一オリジンから配信する。
+  // index:false にして「/」へのアクセスはSPAフォールバック側に統一する
+  // (history APIによるパスベースルーティングを将来導入してもそのまま機能するように)。
+  await app.register(staticPlugin, { root: PUBLIC_DIR, index: false });
+  app.setNotFoundHandler((req, reply) => {
+    const url = new URL(req.url, "http://internal");
+    if (url.pathname.startsWith("/api/")) return reply.code(404).send({ error: "not found" });
+    return reply.sendFile("index.html");
+  });
 
   // 期限切れセッションの定期掃除。検証時の個別削除だけでは「発行後一度も
   // 使われずに放置されたセッション」がDBに残り続けるため、別途間引いて掃除する。
