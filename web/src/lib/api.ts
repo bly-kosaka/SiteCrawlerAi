@@ -3,49 +3,20 @@ import type { CrawlSummary, PageNode, PageDetail, PageTreeNode, Edge, AnalysisSu
 
 const BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "http://localhost:3001";
 
-// API認証はサーバー側が発行する署名付き httpOnly Cookie で行う(ログイン画面でAPIキーを
-// 一度入力すると、以後はブラウザが自動的にCookieを送信する)。
-// 旧方式(APIキーをビルド時に VITE_API_KEY としてバンドルへ埋め込み、x-api-keyヘッダーや
-// SSE用の ?key= クエリへ平文で載せる)は、ビルド成果物を取得すれば誰でもAPIキーを
-// 読み取れてしまい、また ?key= がアクセスログに平文で残り続けるため廃止した。
-// fetch には毎回 credentials:"include" を付与し、Cookieを確実に送受信する。
-
-export class UnauthorizedError extends Error {
-  constructor() {
-    super("unauthorized");
-    this.name = "UnauthorizedError";
-  }
-}
+// API認証はサーバー側のHTTP Basic認証で行う。ブラウザがページ読み込み時に
+// 一度ID/PASSWORDダイアログで取得した資格情報を、以後のリクエストへ自動付与する
+// (Authorization ヘッダー、EventSourceも withCredentials:true で同様)ため、
+// フロントエンド側で認証情報を意識する必要は無い。fetch には credentials:"include"
+// を付与し、Cookie(クロール選択状態の保存用など)も確実に送受信する。
 
 async function request(path: string, init?: RequestInit): Promise<Response> {
-  const res = await fetch(`${BASE}${path}`, { credentials: "include", ...init });
-  if (res.status === 401) throw new UnauthorizedError();
-  return res;
+  return fetch(`${BASE}${path}`, { credentials: "include", ...init });
 }
 
 async function get<T>(path: string): Promise<T> {
   const res = await request(path);
   if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`);
   return res.json() as Promise<T>;
-}
-
-export async function login(apiKey: string): Promise<boolean> {
-  const res = await fetch(`${BASE}/api/login`, {
-    method: "POST",
-    credentials: "include",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ apiKey }),
-  });
-  return res.ok;
-}
-
-export async function logout(): Promise<void> {
-  await fetch(`${BASE}/api/logout`, { method: "POST", credentials: "include" });
-}
-
-export async function checkSession(): Promise<boolean> {
-  const res = await fetch(`${BASE}/api/me`, { credentials: "include" });
-  return res.ok;
 }
 
 export const api = {

@@ -2,7 +2,6 @@
    Shell — fixed brand bar, header, sidebar navigation
    Ported from shell.jsx (window globals → module exports)
    ============================================================ */
-import React from "react";
 import { Icon } from "./icons";
 
 export const NAV = [
@@ -48,20 +47,12 @@ interface HeaderProps {
   when: string;
   crawlId: string;
   onRecrawl: () => void;
-  onLogout: () => void;
 }
 
-export function Header({ page, host, pages, when, crawlId, onRecrawl, onLogout }: HeaderProps) {
+export function Header({ page, host, pages, when, onRecrawl }: HeaderProps) {
   const titles: Record<string, string> = {
     dashboard: "ダッシュボード", sitemap: "サイトマップ", pages: "ページ一覧",
     links: "リンク構造", errors: "エラー", redirects: "リダイレクト", orphans: "孤立ページ", export: "エクスポート",
-  };
-  const [share, setShare] = React.useState(false);
-  const [copied, setCopied] = React.useState(false);
-  const shareUrl = `https://app.sitemapper.ai/share/${host.replace(/\./g, "-")}/${crawlId}`;
-  const copy = () => {
-    navigator.clipboard?.writeText(shareUrl).catch(() => {});
-    setCopied(true); setTimeout(() => setCopied(false), 1600);
   };
   const showTweaks = () => window.postMessage({ type: "__activate_edit_mode" }, "*");
 
@@ -92,40 +83,6 @@ export function Header({ page, host, pages, when, crawlId, onRecrawl, onLogout }
         <Icon.settings size={16} style={{ color: "var(--text-2)" }} />
       </button>
 
-      <button className="btn" title="ログアウト" onClick={onLogout}>ログアウト</button>
-
-      <div style={{ position: "relative" }}>
-        <button className="btn" onClick={() => setShare((v) => !v)}>
-          <Icon.share size={15} /> 共有
-        </button>
-        {share && (
-          <>
-            <div style={{ position: "fixed", inset: 0, zIndex: 40 }} onClick={() => setShare(false)} />
-            <div className="share-pop">
-              <div className="share-h">
-                <span style={{ fontWeight: 650, fontSize: 13 }}>レポートを共有</span>
-                <button className="btn ghost icon sm" onClick={() => setShare(false)}><Icon.close size={14} /></button>
-              </div>
-              <div className="share-sub">このクロール結果へのリンクを発行します。リンクを知っている人が閲覧できます。</div>
-              <div className="share-url">
-                <Icon.link size={14} style={{ color: "var(--text-3)", flex: "none" }} />
-                <span className="mono">{shareUrl}</span>
-              </div>
-              <div className="share-actions">
-                <span className="share-access"><span className="dot-s ok" /> 閲覧のみ・期限なし</span>
-                <button className={"btn primary sm" + (copied ? " ok" : "")} onClick={copy}>
-                  {copied ? <><Icon.check size={14} /> コピーしました</> : <><Icon.copy size={14} /> リンクをコピー</>}
-                </button>
-              </div>
-            </div>
-          </>
-        )}
-      </div>
-
-      <button className="btn icon" title="通知" style={{ position: "relative" }}>
-        <Icon.bell size={16} style={{ color: "var(--text-2)" }} />
-        <span style={{ position: "absolute", top: 6, right: 6, width: 6, height: 6, borderRadius: 99, background: "var(--err)" }} />
-      </button>
       <button className="btn primary" onClick={onRecrawl}>
         <Icon.refresh size={15} /> 再クロール
       </button>

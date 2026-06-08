@@ -9,8 +9,6 @@ import {
   useTweaks, TweaksPanel, TweakSection, TweakRadio, TweakColor,
 } from "./components/tweaks-panel";
 import { SiteProvider, useSite } from "./lib/SiteContext";
-import { LoginScreen } from "./components/LoginScreen";
-import { checkSession, logout } from "./lib/api";
 import { SitemapScreen } from "./screens/SitemapScreen";
 import { PagesScreen } from "./screens/PagesScreen";
 import { LinksScreen } from "./screens/LinksScreen";
@@ -80,7 +78,7 @@ function Placeholder({ page }: { page: string }) {
   );
 }
 
-function AppInner({ onLogout }: { onLogout: () => void }) {
+function AppInner() {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
   const [page, setPage] = useHashRoute();
   const { site, activeId, recrawl } = useSite();
@@ -105,7 +103,6 @@ function AppInner({ onLogout }: { onLogout: () => void }) {
         when={site?.crawl.when ?? ""}
         crawlId={site?.crawl.id ?? ""}
         onRecrawl={() => activeId && recrawl(activeId)}
-        onLogout={onLogout}
       />
       <Sidebar page={page} onNavigate={setPage} counts={counts} health={health} />
       <main className="main">
@@ -149,35 +146,13 @@ function AppInner({ onLogout }: { onLogout: () => void }) {
   );
 }
 
-// ログインゲート: SiteProvider(初回マウント時にAPIへアクセスする)より前段で
-// セッション(Cookie)の有無を確認する。未ログインのまま SiteProvider をマウントすると
-// 各APIが軒並み401を返してしまうため、認証確認が完了するまでアプリ本体を描画しない。
-type AuthState = "checking" | "authenticated" | "unauthenticated";
-
+// 認証はサーバーのHTTP Basic認証(ブラウザ標準のID/PASSWORDダイアログ)で完結する。
+// ここまでページが描画できている時点で、ブラウザは資格情報を保持し以後のAPI呼び出しにも
+// 自動付与するため、フロントエンド側で別途ログイン状態を確認・管理する必要はない。
 export default function App() {
-  const [state, setState] = React.useState<AuthState>("checking");
-
-  React.useEffect(() => {
-    let cancelled = false;
-    checkSession().then((ok) => {
-      if (!cancelled) setState(ok ? "authenticated" : "unauthenticated");
-    });
-    return () => { cancelled = true; };
-  }, []);
-
-  const handleLogout = React.useCallback(() => {
-    logout().finally(() => setState("unauthenticated"));
-  }, []);
-
-  if (state === "checking") {
-    return <div style={{ height: "100vh", display: "grid", placeItems: "center", background: "var(--bg)" }} />;
-  }
-  if (state === "unauthenticated") {
-    return <LoginScreen onSuccess={() => setState("authenticated")} />;
-  }
   return (
     <SiteProvider>
-      <AppInner onLogout={handleLogout} />
+      <AppInner />
     </SiteProvider>
   );
 }
