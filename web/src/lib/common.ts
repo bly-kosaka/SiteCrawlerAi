@@ -2,7 +2,7 @@
    共通ヘルパー — ステータス/問題の定義（全画面で共有）
    ported from common.jsx (window globals → module exports)
    ============================================================ */
-import type { PageNode } from "./types";
+import type { PageNode, PageTreeNode } from "./types";
 
 export const STATUS_META: Record<number, { cls: string; dot: string; label: string; jp: string }> = {
   200: { cls: "ok", dot: "ok", label: "200", jp: "正常" },
@@ -62,6 +62,38 @@ export function downloadFile(name: string, content: string | Blob, mime = "text/
 }
 
 export const issuesText = (issues: string[]) => issues.map((i) => ISSUE_META[i]?.label ?? i).join(" / ");
+
+// URLパスのディレクトリ構造に基づいてツリーを構築する。
+// 通常のツリー（site.tree）はクロール中に最初にリンクを発見した経路を親とするため、
+// HTMLサイトマップのような「全ページへのリンク集」が他ページの親になってしまうことがある。
+// その代替として、URLパスの上位セグメントに該当する既存ページを親とみなすツリーを提供する。
+export function buildPathTree(flat: PageNode[]): PageTreeNode | null {
+  if (!flat.length) return null;
+  const byUrl = new Map(flat.map((n) => [n.url, n]));
+  const root = byUrl.get("/") ?? flat.reduce((a, b) => (a.depth <= b.depth ? a : b));
+
+  const childrenOf = new Map<string, PageNode[]>();
+  for (const n of flat) {
+    if (n.url === root.url) continue;
+    const segs = n.url.split("/").filter(Boolean);
+    let parent = root;
+    for (let i = segs.length - 1; i > 0; i--) {
+      const candidate = byUrl.get("/" + segs.slice(0, i).join("/"));
+      if (candidate) { parent = candidate; break; }
+    }
+    if (!childrenOf.has(parent.url)) childrenOf.set(parent.url, []);
+    childrenOf.get(parent.url)!.push(n);
+  }
+
+  const build = (n: PageNode, depth: number): PageTreeNode => ({
+    ...n,
+    depth,
+    children: (childrenOf.get(n.url) || [])
+      .sort((a, b) => a.url.localeCompare(b.url))
+      .map((k) => build(k, depth + 1)),
+  });
+  return build(root, 0);
+}
 
 export const orphanReason = (n: PageNode) => {
   const r = ["内部リンクなし"];

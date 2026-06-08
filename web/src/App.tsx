@@ -21,6 +21,7 @@ import { RedirectsScreen } from "./screens/RedirectsScreen";
 const TWEAK_DEFAULTS = {
   density: "compact",
   treeMode: "title",
+  treeBasis: "link",
   detailMode: "stacked",
   accent: "#2563eb",
 };
@@ -107,7 +108,11 @@ function AppInner() {
       <Sidebar page={page} onNavigate={setPage} counts={counts} health={health} />
       <main className="main">
         {page === "sitemap"
-          ? <SitemapScreen treeMode={t.treeMode as "title" | "path"} detailMode={t.detailMode as "stacked" | "compact"} />
+          ? <SitemapScreen
+              treeMode={t.treeMode as "title" | "path"}
+              treeBasis={t.treeBasis as "link" | "path"}
+              detailMode={t.detailMode as "stacked" | "compact"}
+            />
           : page === "pages"
           ? <PagesScreen />
           : page === "links"
@@ -127,6 +132,9 @@ function AppInner() {
 
       <TweaksPanel>
         <TweakSection label="サイトマップ — ツリー" />
+        <TweakRadio label="ツリーの基準" value={t.treeBasis as string}
+          options={[{ value: "link", label: "リンク構造" }, { value: "path", label: "URLディレクトリ" }]}
+          onChange={(v) => setTweak("treeBasis", v)} />
         <TweakRadio label="ツリー表記" value={t.treeMode as string}
           options={[{ value: "title", label: "タイトル" }, { value: "path", label: "URLパス" }]}
           onChange={(v) => setTweak("treeMode", v)} />

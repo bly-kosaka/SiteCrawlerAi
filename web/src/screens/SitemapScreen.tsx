@@ -4,7 +4,7 @@
    ============================================================ */
 import React from "react";
 import { Icon } from "../components/icons";
-import { statusOf, lastSeg, ISSUE_META, ISSUE_HINT } from "../lib/common";
+import { statusOf, lastSeg, ISSUE_META, ISSUE_HINT, buildPathTree } from "../lib/common";
 import { useSite } from "../lib/SiteContext";
 import { api } from "../lib/api";
 import type { PageNode, PageTreeNode } from "../lib/types";
@@ -85,19 +85,22 @@ interface TreeProps {
 
 function Tree({ root, mode, expanded, onToggle, selected, onSelect, visibleIds }: TreeProps) {
   const rows: React.ReactElement[] = [];
-  const walk = (node: PageTreeNode) => {
+  // インデント幅はツリー上の実際の階層（再帰の深さ）で決める。
+  // node.depth はクロール時のリンク距離（detailパネルの「階層」表示用）であり、
+  // URLディレクトリツリーなど親子関係が異なるツリーでは表示位置と一致しないため。
+  const walk = (node: PageTreeNode, level: number) => {
     if (visibleIds && !visibleIds.has(node.id)) return;
     const kids = (node.children || []).filter((c) => !visibleIds || visibleIds.has(c.id));
     rows.push(
       <TreeRow
-        key={node.id} node={node} depth={node.depth} mode={mode}
+        key={node.id} node={node} depth={level} mode={mode}
         expanded={expanded} onToggle={onToggle} selected={selected} onSelect={onSelect}
         hasKids={(node.children || []).length > 0}
       />
     );
-    if (expanded.has(node.id)) kids.forEach(walk);
+    if (expanded.has(node.id)) kids.forEach((k) => walk(k, level + 1));
   };
-  walk(root);
+  walk(root, 0);
   return <div className="tree">{rows}</div>;
 }
 
@@ -260,13 +263,18 @@ export function DetailPanel({ node, mode, allFlat, onSelect, host, crawlId }: De
 
 export interface SitemapScreenProps {
   treeMode: "title" | "path";
+  treeBasis: "link" | "path";
   detailMode: "stacked" | "compact";
 }
 
-export function SitemapScreen({ treeMode, detailMode }: SitemapScreenProps) {
+export function SitemapScreen({ treeMode, treeBasis, detailMode }: SitemapScreenProps) {
   const { site } = useSite();
-  const TREE = site?.tree ?? null;
   const flat = site?.flat ?? [];
+  // 「リンク構造」= クロールで発見した経路をそのまま親子関係とするツリー（site.tree）
+  // 「URLディレクトリ」= URLパスの上位セグメントに対応する既存ページを親とみなすツリー
+  // （HTMLサイトマップ等の「全ページへのリンク集」が他ページの親に見えてしまう問題を避けたい場合に使う）
+  const pathTree = React.useMemo(() => (treeBasis === "path" ? buildPathTree(flat) : null), [treeBasis, flat]);
+  const TREE = treeBasis === "path" ? pathTree : site?.tree ?? null;
   const host = site?.host ?? "";
   const counts = site?.counts ?? { pages: 0, ok: 0, errors: 0, redirects: 0, orphans: 0, noindex: 0, dupTitles: 0 };
 
