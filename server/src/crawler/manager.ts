@@ -169,5 +169,10 @@ function emitProgress(id: string, p: CrawlProgress) {
 export async function recrawl(id: string): Promise<{ id: string } | null> {
   const existing = await prisma.crawl.findUnique({ where: { id } });
   if (!existing) return null;
-  return startCrawl({ startUrl: existing.startUrl, maxDepth: existing.maxDepth, label: existing.label });
+  // render を渡さないと startCrawl 側で `?? true`(JSレンダリングあり)が既定値となり、
+  // UIから開始する通常クロール(常に render: false)と挙動が食い違う。
+  // 本番のPlaywright実行環境ではレンダリングが機能せず、再クロールが
+  // 「0ページで完了したように見える」(全ページ取得失敗)不具合の原因になっていたため、
+  // 通常クロールと同じ render: false を明示する。
+  return startCrawl({ startUrl: existing.startUrl, maxDepth: existing.maxDepth, label: existing.label, render: false });
 }
