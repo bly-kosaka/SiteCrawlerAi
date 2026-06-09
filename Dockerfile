@@ -37,4 +37,4 @@ COPY --from=web-build /web/dist ./public
 
 # 起動時にDBマイグレーションを反映してからサーバーを起動する
 # (migrate dev ではなく、本番向けの migrate deploy を使う)
-CMD ["sh", "-c", "npx prisma migrate deploy && node dist/index.js"]
+CMD ["sh", "-c", "npx prisma migrate deploy && node --max-old-space-size=512 dist/index.js"]

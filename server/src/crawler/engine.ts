@@ -181,6 +181,13 @@ export async function runCrawl(
     return true;
   }
 
+  // ヒープ使用量の安全上限。クロール対象が大規模サイト(大学/ECサイト等)の場合、
+  // rawPages に大量のデータが蓄積されて Railway コンテナの RAM 上限を超えてしまい、
+  // プロセスが OS に強制終了(OOM Kill)されることがあった。
+  // --max-old-space-size=512(Dockerfile) と組み合わせて、この閾値を超えたらクロールを
+  // 安全に truncated 停止させ、DB に保存・完了状態にできるようにする。
+  const HEAP_LIMIT_BYTES = 350 * 1024 * 1024; // 350 MB
+
   async function worker() {
     while (true) {
       const item = queue.shift();
@@ -189,6 +196,15 @@ export async function runCrawl(
         await sleep(50);
         continue;
       }
+
+      // ヒープ使用量が閾値を超えていたらキューを空にして安全に打ち切る
+      if (process.memoryUsage().heapUsed > HEAP_LIMIT_BYTES) {
+        truncated = true;
+        queue.length = 0;
+        console.warn(`[crawl] ヒープ使用量が 350MB を超えたため、クロールを安全に打ち切ります (${rawPages.size} ページ取得済)`);
+        return;
+      }
+
       active++;
       try {
         const sinceLast = Date.now() - lastFetchAt;
