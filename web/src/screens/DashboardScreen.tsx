@@ -150,7 +150,7 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
         {active.truncated && (
           <div className="db-truncated-note">
             <Icon.errors size={15} />
-            このクロールはページ数の上限（{active.pages.toLocaleString()} 件）に達したため途中で打ち切られました。サイト全体を網羅していない可能性があります。
+            <span>このクロールは途中で打ち切られました（{active.pages.toLocaleString()} 件取得済）。サイト全体を網羅していない可能性があります。再クロールすると改善することがあります。</span>
           </div>
         )}
 
@@ -191,7 +191,10 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
               <div key={c.id} className={"cl-row" + (c.id === activeId ? " active" : "")} onClick={() => setActiveId(c.id)} onDoubleClick={() => onNavigate("sitemap")}>
                 <span className="cl-fav">{c.host[0].toUpperCase()}</span>
                 <div className="cl-tx">
-                  <div className="cl-host">{c.host}</div>
+                  <div className="cl-host">
+                    {c.host}
+                    {c.truncated && <span className="badge warn" style={{ marginLeft: 6, fontSize: 10, height: 16 }}>打ち切り</span>}
+                  </div>
                   <div className="cl-meta">{c.label} ・ {c.pages} URL ・ {c.when}</div>
                 </div>
                 <button className="cl-open" onClick={(e) => { e.stopPropagation(); setActiveId(c.id); onNavigate("sitemap"); }}>開く →</button>

@@ -385,6 +385,13 @@ export function SitemapScreen({ treeMode, treeBasis, onTreeBasisChange, detailMo
           <button className="btn ghost icon sm" title="すべて折りたたむ" onClick={collapseAll}><Icon.expand size={15} style={{ transform: "rotate(180deg)" }} /></button>
         </div>
 
+        {site?.crawl.truncated && (
+          <div className="sm-truncated-banner">
+            <Icon.errors size={14} />
+            クロールが途中で打ち切られました。{site.crawl.pages.toLocaleString()} 件のみ取得済です。再クロールで改善することがあります。
+          </div>
+        )}
+
         <div className="sm-toolbar">
           <div className="search" style={{ flex: 1, minWidth: 0 }}>
             <Icon.search size={14} />

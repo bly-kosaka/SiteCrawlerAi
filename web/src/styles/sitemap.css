@@ -16,6 +16,11 @@
   border-right: 1px solid var(--border);
   background: var(--surface);
 }
+.sm-truncated-banner {
+  display: flex; align-items: center; gap: 8px; padding: 9px 14px;
+  background: var(--warn-weak); color: var(--warn); font-size: 12px; line-height: 1.5;
+  border-bottom: 1px solid #f5d08a;
+}
 .sm-toolbar { display: flex; gap: 8px; padding: 10px 12px 8px; }
 .sm-filters {
   display: flex; gap: 6px; padding: 0 12px 10px; flex-wrap: wrap;
