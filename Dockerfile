@@ -2,12 +2,13 @@
 # (別オリジンの2サービス構成だとセッションCookieがサードパーティCookie扱いとなり、
 #  ブラウザのプライバシー保護機能でブロックされてログインが維持できない問題があった)
 
-# Node.jsのバージョンはパッチまで固定する(2026年10月のセキュリティリリース v24.22.1 以上を使うこと)。
+# Node.jsのバージョンはパッチまで固定する(2026年11月のセキュリティリリース v24.22.3 以上を使うこと。
+#  HTTP/2・TLS・llhttp 等の脆弱性修正。2026年10月のリリースで v24.22.1 に上げたのに続く更新)。
 # 更新時は web-build / 実行ステージの両方を揃えて変更する。
 
 # ---- フロントエンドのビルド ----
 # VITE_API_BASE は空文字にする(同一オリジンなので相対パス /api/... で呼び出す)。
-FROM node:24.22.1-bookworm-slim AS web-build
+FROM node:24.22.3-bookworm-slim AS web-build
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
@@ -19,7 +20,7 @@ RUN npm run build
 # 以前はJSレンダリング用に Playwright の Chromium と OS 依存ライブラリ(libnss3 等)を
 # `playwright install --with-deps` で導入していたが、JSレンダリング機能は本番で機能しておらず
 # 機能ごと撤去したため、Node 公式の slim イメージに Prisma が必要とするパッケージだけを入れる構成にした。
-FROM node:24.22.1-bookworm-slim
+FROM node:24.22.3-bookworm-slim
 WORKDIR /app
 
 # Prismaのクエリエンジンが libssl を必要とするため openssl を入れておく
