@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import Fastify from "fastify";
+import Fastify, { LogController } from "fastify";
 import cors from "@fastify/cors";
 import cookie from "@fastify/cookie";
 import helmet from "@fastify/helmet";
@@ -158,17 +158,24 @@ async function main() {
   // "request completed")を下のフックで出力する。
   // 注意: disableRequestLogging は標準エラーハンドラのエラーログ(5xx のスタック等)も止めるため、
   // 5xx の原因は下の onError フックで別途出力する。
+  // (Fastify 5 ではトップレベルの disableRequestLogging オプションが非推奨(FSTDEP023)になったため、
+  //  同じ設定を LogController 経由で渡す)
   // frameworkErrors: ルーティング前に検出される不正なURL(デコードできないパーセントエンコード等)を
-  // 一律 400 で閉じる。Fastify 4 の既定でも 400 だが、エラー本文にリクエストパスをそのまま埋め込むため
+  // 一律 400 で閉じる。Fastify の既定でも 400 だが、エラー本文にリクエストパスをそのまま埋め込むため
   // 固定文言にしておく。この時点では認証(onRequest)より前なので、未認証者にも同じ 400 が返る。
-  // (ルートが1つも無いメソッドの不正URLはここを通らず not-found ハンドラーへ直行する。
-  //  そちらの対策は下の setNotFoundHandler 参照)
+  // (Fastify 4 では、ルートが1つも無いメソッドの不正URLはここを通らず not-found ハンドラーへ直行していた。
+  //  Fastify 5.12.2 以降は not-found 用のルーターも不正URLをここへ回す。下の setNotFoundHandler 参照)
+  // パスパラメーターが上限長(maxParamLength、既定 100 文字)を超える場合(FST_ERR_MAX_PARAM_LENGTH)も
+  // Fastify 5 ではここへ来る(v4 では単に一致するルートなし扱いで、認証後に 404 になっていた)。
+  // 認証より前に返るため、未認証者に返す応答の種類を増やさないよう不正URLと同じ 400 にそろえる。
   const app = Fastify({
     logger: true,
     trustProxy: TRUST_PROXY,
-    disableRequestLogging: true,
+    logController: new LogController({ disableRequestLogging: true }),
     frameworkErrors: (err: FastifyError, _req: FastifyRequest, reply: FastifyReply) => {
-      if (err.code === "FST_ERR_BAD_URL") return reply.code(400).send({ error: "bad request" });
+      if (err.code === "FST_ERR_BAD_URL" || err.code === "FST_ERR_MAX_PARAM_LENGTH") {
+        return reply.code(400).send({ error: "bad request" });
+      }
       return reply.code(500).send({ error: "internal server error" });
     },
   });
@@ -212,6 +219,9 @@ async function main() {
   await app.register(cors, {
     origin: CORS_ORIGINS,
     credentials: true,
+    // @fastify/cors v11 で既定の許可メソッドが CORS セーフリストのメソッド(GET/HEAD/POST)のみに変わったため、
+    // 従来の既定値(このアプリが使う PATCH/DELETE を含む)を明示する。
+    methods: "GET,HEAD,PUT,PATCH,POST,DELETE",
   });
   await app.register(cookie);
   await app.register(rateLimit, {
@@ -253,25 +263,34 @@ async function main() {
   await app.register(staticPlugin, {
     root: PUBLIC_DIR,
     index: false,
-    setHeaders: (res, filePath) => {
+    // 末尾が「/」のパス(「/」自体や「/assets/」などのディレクトリ)はファイルとして配信しない。
+    // @fastify/static v10 では index:false のディレクトリ要求が 403 になるため、ここで除外して
+    // 従来どおり not-found ハンドラー(SPAフォールバック)へ回す。
+    allowedPath: (pathName) => !pathName.endsWith("/"),
+    // @fastify/static v10 以降、setHeaders には生の http.ServerResponse ではなく FastifyReply が渡され、
+    // 既定の Cache-Control 等を設定した後に呼ばれる(ここで設定した値が既定値を上書きする)。
+    setHeaders: (reply, filePath) => {
       if (filePath.startsWith(ASSETS_DIR)) {
-        res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+        reply.header("Cache-Control", "public, max-age=31536000, immutable");
       } else if (path.basename(filePath) === "index.html") {
-        res.setHeader("Cache-Control", "no-cache");
+        reply.header("Cache-Control", "no-cache");
       }
     },
   });
   // SPAフォールバック兼 404 応答。
-  // 注意(CVE-2026-76169 / GHSA-p68q-wchp-6fh7): Fastify 4 では「ルートが1つも登録されていないメソッド」
-  // (PUT 等)で不正なURLが来ると、このハンドラーが onRequest / preHandler フックを一切通らずに直接呼ばれる
-  // (= 上の Basic 認証フックがスキップされる)。v4 系には修正版が無いため、このハンドラー自体を
-  // 「ライフサイクル外から呼ばれても安全」に作る:
+  // 経緯(CVE-2026-76169 / GHSA-p68q-wchp-6fh7): Fastify 4 では「ルートが1つも登録されていないメソッド」
+  // (PUT 等)で不正なURLが来ると、このハンドラーが onRequest / preHandler フックを一切通らずに直接呼ばれ
+  // (= 上の Basic 認証フックがスキップされる)、プロセスが落ちることもあった。
+  // Fastify 5.12.2 以降で修正済み(そうした不正URLは上の frameworkErrors で 400 になり、ここへは来ない)だが、
+  // 将来の同種の不具合に備えた多層防御として、このハンドラー自体を「ライフサイクル外から呼ばれても安全」に
+  // 作る方針は維持する:
   //  - 冒頭で Basic 認証を自前で検証する(検証は @fastify/basic-auth の app.basicAuth をそのまま呼び、
-  //    ヘッダの解釈・validate・401 応答の形を通常経路と共有する。通常経路では認証済みなので二重検証になるが無害)
-  //  - reply.sendFile 等のプラグインのデコレーターに依存しない(その経路の reply には付いておらず、
+  //    ヘッダの解釈・validate・401 応答の形を通常経路と共有する。通常経路では onRequest で認証済みのため
+  //    二重検証になるが、未認証のリクエストは onRequest の 401 で打ち切られてここへ来ないので、401 が
+  //    二重に送られることはない)
+  //  - reply.sendFile 等のプラグインのデコレーターに依存しない(v4 のその経路の reply には付いておらず、
   //    呼ぶと未捕捉の TypeError でプロセスごと落ちていた)
-  //  - 例外を外へ投げない(その経路では Fastify が例外を捕捉しないため)
-  // 恒久対応は Fastify 5.12.2 以上への更新。
+  //  - 例外を外へ投げない(v4 のその経路では Fastify が例外を捕捉しなかったため)
   app.setNotFoundHandler((req, reply) => {
     handleNotFound(app, req, reply).catch((err) => {
       req.log.error({ err }, "not-found handler failed");
