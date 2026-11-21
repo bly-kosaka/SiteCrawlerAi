@@ -1,5 +1,5 @@
 import type { PageDTO, PageTreeNode, CrawlDTO } from "../serialize.js";
-import type { CrawledEdge } from "../crawler/engine.js";
+import type { EdgeRow } from "./edges.js";
 import { ISSUE_LABEL_JP, EDGE_TYPE_JP, STATUS_JP, type Issue } from "../constants.js";
 import { buildRedirectChains, orphanReason } from "../analysis/analyze.js";
 
@@ -12,11 +12,18 @@ export type DatasetKey =
   | "redirects"
   | "orphans";
 
+export type Row = (string | number)[];
+
 export interface Dataset {
   key: DatasetKey;
   sheet: string;
   headers: string[];
-  rows: (string | number)[][];
+  /**
+   * データ行をバッチ単位で返す（呼ぶたびに先頭から列挙し直せる）。
+   * 「リンク」は行数がページ数×リンク数規模になるため、全行を配列として持たずに DB から
+   * バッチ単位で読みながら返す。その他のデータセットは行数がページ数以下なので1バッチで返す。
+   */
+  rows: () => AsyncIterable<Row[]>;
   /** Excel専用のレイアウト（階層を列分割し、縦結合する場合に使用。CSVは headers/rows をそのまま使う） */
   excel?: {
     headers: string[];
@@ -32,19 +39,30 @@ const issuesText = (issues: string[]) => issues.map((i) => ISSUE_LABEL_JP[i as I
 export interface DatasetSource {
   pages: PageDTO[];
   tree: PageTreeNode | null;
-  edges: CrawledEdge[];
+  // edges をバッチ単位で返す（呼ぶたびに先頭から読み直す）。「リンク」以外では呼ばれない
+  edgeBatches: () => AsyncIterable<EdgeRow[]>;
   crawl: CrawlDTO;
 }
 
+// 配列をそのまま1バッチとして返す rows 関数を作る
+function fromArray(rows: Row[]): () => AsyncIterable<Row[]> {
+  return async function* () {
+    yield rows;
+  };
+}
+
 function buildSitemapTable(src: DatasetSource): Dataset {
+  // 子ページ数は事前に親 id ごとに数えておく（以前はページごとに全ページを走査しており、
+  // ページ数の2乗の計算量になっていた。結果は同じ）
+  const childCount = new Map<string, number>();
+  for (const c of src.pages) if (c.parent) childCount.set(c.parent, (childCount.get(c.parent) ?? 0) + 1);
   return {
     key: "sitemap-table",
     sheet: "サイトマップ表",
     headers: ["URL", "タイトル", "ステータス", "階層", "親URL", "子ページ数", "被リンク", "問題"],
-    rows: src.pages.map((p) => {
-      const childCount = src.pages.filter((c) => c.parent === p.id).length;
-      return [p.url, p.title, p.status, p.depth, p.parent ?? "（ルート）", childCount, p.inLinks, issuesText(p.issues)];
-    }),
+    rows: fromArray(
+      src.pages.map((p) => [p.url, p.title, p.status, p.depth, p.parent ?? "（ルート）", childCount.get(p.id) ?? 0, p.inLinks, issuesText(p.issues)])
+    ),
   };
 }
 
@@ -70,7 +88,7 @@ function walkTreeLines(root: PageTreeNode): { node: PageTreeNode; line: string }
 
 function buildSitemapTree(src: DatasetSource): Dataset {
   if (!src.tree) {
-    return { key: "sitemap-tree", sheet: "サイトマップ階層", headers: ["階層", "構造", "URL", "ステータス", "問題"], rows: [] };
+    return { key: "sitemap-tree", sheet: "サイトマップ階層", headers: ["階層", "構造", "URL", "ステータス", "問題"], rows: fromArray([]) };
   }
 
   const ordered = walkTreeLines(src.tree);
@@ -111,7 +129,7 @@ function buildSitemapTree(src: DatasetSource): Dataset {
     key: "sitemap-tree",
     sheet: "サイトマップ階層",
     headers: ["階層", "構造", "URL", "ステータス", "問題"],
-    rows,
+    rows: fromArray(rows),
     excel: { headers: excelHeaders, rows: excelRows, merges },
   };
 }
@@ -121,7 +139,7 @@ function buildPages(src: DatasetSource): Dataset {
     key: "pages",
     sheet: "ページ",
     headers: ["URL", "ステータス", "タイトル", "H1", "階層", "正規URL", "Noindex", "被リンク", "発リンク", "単語数", "サイズKB", "問題"],
-    rows: src.pages.map((p) => [
+    rows: fromArray(src.pages.map((p) => [
       p.url,
       p.status,
       p.title,
@@ -134,7 +152,7 @@ function buildPages(src: DatasetSource): Dataset {
       p.words,
       p.size,
       issuesText(p.issues),
-    ]),
+    ])),
   };
 }
 
@@ -144,13 +162,19 @@ function buildLinks(src: DatasetSource): Dataset {
     key: "links",
     sheet: "リンク",
     headers: ["リンク元URL", "リンク先URL", "種別", "元ステータス", "先ステータス"],
-    rows: src.edges
-      .filter((e) => byId.has(e.s) && byId.has(e.t))
-      .map((e) => {
-        const s = byId.get(e.s)!;
-        const t = byId.get(e.t)!;
-        return [s.url, t.url, EDGE_TYPE_JP[e.type] ?? e.type, s.status, t.status];
-      }),
+    // edges は全件を配列にせず、DB からバッチ単位で読みながら行に変換する
+    rows: async function* () {
+      for await (const batch of src.edgeBatches()) {
+        const rows: Row[] = [];
+        for (const e of batch) {
+          const s = byId.get(e.s);
+          const t = byId.get(e.t);
+          if (!s || !t) continue;
+          rows.push([s.url, t.url, EDGE_TYPE_JP[e.type] ?? e.type, s.status, t.status]);
+        }
+        yield rows;
+      }
+    },
   };
 }
 
@@ -160,7 +184,7 @@ function buildErrors(src: DatasetSource): Dataset {
     key: "errors",
     sheet: "エラー",
     headers: ["URL", "ステータス", "種別", "被リンク", "階層"],
-    rows: errs.map((p) => [p.url, p.status, STATUS_JP[p.status] ?? "", p.inLinks, p.depth]),
+    rows: fromArray(errs.map((p) => [p.url, p.status, STATUS_JP[p.status] ?? "", p.inLinks, p.depth])),
   };
 }
 
@@ -172,7 +196,7 @@ function buildRedirects(src: DatasetSource): Dataset {
     key: "redirects",
     sheet: "リダイレクト",
     headers: ["リンク元URL", "リダイレクト先", "ステータス", "チェーン深さ"],
-    rows: all.map((p) => [p.url, p.redirectTo || "", p.status, byUrl.get(p.url)?.depth ?? 1]),
+    rows: fromArray(all.map((p) => [p.url, p.redirectTo || "", p.status, byUrl.get(p.url)?.depth ?? 1])),
   };
 }
 
@@ -182,7 +206,7 @@ function buildOrphans(src: DatasetSource): Dataset {
     key: "orphans",
     sheet: "孤立ページ",
     headers: ["URL", "ステータス", "タイトル", "被リンク", "Noindex", "孤立の理由", "階層"],
-    rows: orphans.map((p) => [p.url, p.status, p.title, p.inLinks, p.noindex ? "noindex" : "index", orphanReason(p), p.depth]),
+    rows: fromArray(orphans.map((p) => [p.url, p.status, p.title, p.inLinks, p.noindex ? "noindex" : "index", orphanReason(p), p.depth])),
   };
 }
 

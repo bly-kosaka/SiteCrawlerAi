@@ -2,7 +2,7 @@
    共通ヘルパー — ステータス/問題の定義（全画面で共有）
    ported from common.jsx (window globals → module exports)
    ============================================================ */
-import type { PageNode, PageTreeNode } from "./types";
+import type { PageNode, PageTreeNode, StopReason } from "./types";
 
 export const STATUS_META: Record<number, { cls: string; dot: string; label: string; jp: string }> = {
   200: { cls: "ok", dot: "ok", label: "200", jp: "正常" },
@@ -63,6 +63,34 @@ export function downloadFile(name: string, content: string | Blob, mime = "text/
 
 export const issuesText = (issues: string[]) => issues.map((i) => ISSUE_META[i]?.label ?? i).join(" / ");
 
+// flat + parent から木構造を構築する（「リンク構造」ツリー = site.tree）。
+// 以前はサーバーの /tree が組み立てた入れ子JSONを受け取っていたが、/pages と全ページを
+// 二重に転送・DB読み出ししていたため、取得済みの flat から組み立てるようにした。
+// ロジックは server/src/serialize.ts の buildTree と同一（エクスポートのツリーと一致させるため、
+// 変更する場合は両方を合わせること）。flat は /pages の既定順（URL 昇順）である前提。
+// メモリ節約のため、ツリーのノードは複製せず flat の各ページオブジェクトそのものに children を付ける
+// （flat と tree で同じオブジェクトを共有する。以前は全ページを複製して二重に保持していた）。
+// そのため引数の各要素を書き換える。呼び出し元は API から取得した直後の配列を渡すこと。
+export function buildTree(pages: PageNode[]): PageTreeNode | null {
+  const byId = new Map<string, PageTreeNode>();
+  for (const p of pages) {
+    const node = p as PageTreeNode;
+    node.children = [];
+    byId.set(p.id, node);
+  }
+  let root: PageTreeNode | null = null;
+  for (const p of pages) {
+    const node = byId.get(p.id)!;
+    if (p.parent && byId.has(p.parent)) {
+      byId.get(p.parent)!.children!.push(node);
+    } else if (p.depth === 0) {
+      root = node;
+    }
+  }
+  if (!root) root = byId.values().next().value ?? null;
+  return root;
+}
+
 // URLパスのディレクトリ構造に基づいてツリーを構築する。
 // 通常のツリー（site.tree）はクロール中に最初にリンクを発見した経路を親とするため、
 // HTMLサイトマップのような「全ページへのリンク集」が他ページの親になってしまうことがある。
@@ -95,7 +123,26 @@ export function buildPathTree(flat: PageNode[]): PageTreeNode | null {
   return build(root, 0);
 }
 
-export const orphanReason = (n: PageNode) => {
+// 打ち切られたクロールの通知文言。理由(stopReason)は進捗 SSE の done イベントでしか分からず
+// DB には残らないため、このタブで完了を見届けていない場合（リロード後・他タブで実行など）は
+// undefined/null となり、汎用文言にする。cancel はユーザー自身の操作なので警告色ではなく情報表示。
+export function truncationNotice(stopReason: StopReason | null | undefined, pages: number): { cls: "warn" | "info"; text: string } {
+  const got = `${pages.toLocaleString()} 件取得済`;
+  switch (stopReason) {
+    case "pages":
+      return { cls: "warn", text: `ページ数の上限に達したため、クロールを途中で打ち切りました（${got}）。サイト全体を網羅していない可能性があります。` };
+    case "heap":
+      return { cls: "warn", text: `サーバーのメモリを保護するため、クロールを途中で打ち切りました（${got}）。サイト全体を網羅していない可能性があります。再クロールすると改善することがあります。` };
+    case "time":
+      return { cls: "warn", text: `60分の時間上限に達したため、クロールを途中で打ち切りました（${got}）。サイト全体を網羅していない可能性があります。` };
+    case "cancel":
+      return { cls: "info", text: `ユーザーの操作でクロールを中止しました。中止までに取得した結果（${got}）を表示しています。` };
+    default:
+      return { cls: "warn", text: `このクロールは途中で打ち切られたため、結果は一部です（${got}）。再クロールすると改善することがあります。` };
+  }
+}
+
+export const orphanReason =(n: PageNode) => {
   const r = ["内部リンクなし"];
   if (n.noindex) r.push("noindex");
   if (n.status === 404 || n.status === 410) r.push("削除済");

@@ -8,11 +8,11 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma migrate dev",
-    "playwright:install": "playwright install chromium"
+    "prisma:migrate": "prisma migrate dev"
   },
   "dependencies": {
     "@fastify/basic-auth": "^5.1.1",
+    "@fastify/compress": "^7.0.3",
     "@fastify/cookie": "^9.4.0",
     "@fastify/cors": "^9.0.1",
     "@fastify/helmet": "^11.1.1",
@@ -22,7 +22,6 @@
     "cheerio": "^1.0.0",
     "exceljs": "^4.4.0",
     "fastify": "^4.28.1",
-    "playwright": "^1.64.1",
     "undici": "^6.29.1",
     "zod": "^3.23.8"
   },

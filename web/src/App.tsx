@@ -9,6 +9,7 @@ import {
   useTweaks, TweaksPanel, TweakSection, TweakRadio, TweakColor,
 } from "./components/tweaks-panel";
 import { SiteProvider, useSite } from "./lib/SiteContext";
+import { CrawlNoticeToast, CrawlRunningPlaceholder } from "./components/CrawlStatus";
 import { SitemapScreen } from "./screens/SitemapScreen";
 import { PagesScreen } from "./screens/PagesScreen";
 import { LinksScreen } from "./screens/LinksScreen";
@@ -82,7 +83,11 @@ function Placeholder({ page }: { page: string }) {
 function AppInner() {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
   const [page, setPage] = useHashRoute();
-  const { site, activeId, crawls, setActiveId, recrawl } = useSite();
+  const { site, activeId, crawls, setActiveId, recrawl, crawlRun } = useSite();
+  // 表示対象のクロールが実行中（結果は完了まで空）なら、ダッシュボード以外は「クロール中」表示にする。
+  // 新規クロール開始直後に直前のクロールの結果が表示されたままになるのを避ける目的もある。
+  const activeInProgress = !!site && (site.crawl.status === "running" || site.crawl.status === "queued");
+  const showDashboard = React.useCallback(() => setPage("dashboard"), [setPage]);
 
   React.useEffect(() => {
     const r = document.documentElement;
@@ -105,11 +110,15 @@ function AppInner() {
         crawlId={site?.crawl.id ?? ""}
         crawls={crawls}
         onRecrawl={() => activeId && recrawl(activeId)}
+        crawlRunning={!!crawlRun}
         onSwitchCrawl={setActiveId}
       />
       <Sidebar page={page} onNavigate={setPage} counts={counts} health={health} />
+      <CrawlNoticeToast onShowProgress={showDashboard} />
       <main className="main">
-        {page === "sitemap"
+        {activeInProgress && page !== "dashboard"
+          ? <CrawlRunningPlaceholder onShowProgress={showDashboard} />
+          : page === "sitemap"
           ? <SitemapScreen
               treeMode={t.treeMode as "title" | "path"}
               treeBasis={t.treeBasis as "link" | "path"}

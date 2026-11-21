@@ -1,5 +1,6 @@
 /* API client — replaces data.js / window.SITE with fetches against the Fastify backend */
-import type { CrawlSummary, PageNode, PageDetail, PageTreeNode, Edge, AnalysisSummary, RedirectChain, SiteData } from "./types";
+import type { CrawlSummary, PageNode, PageDetail, Edge, AnalysisSummary, RedirectChain, SiteData } from "./types";
+import { buildTree } from "./common";
 
 const BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? "http://localhost:3001";
 
@@ -15,36 +16,71 @@ async function request(path: string, init?: RequestInit): Promise<Response> {
 
 async function get<T>(path: string): Promise<T> {
   const res = await request(path);
-  if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`);
+  // 呼び出し側が 404 等を判別できるよう ApiError（Error のサブクラス）で投げる
+  if (!res.ok) throw new ApiError(res.status, `${path}: HTTP ${res.status}`, null);
   return res.json() as Promise<T>;
+}
+
+// HTTP ステータスとサーバーの応答本文を保持するエラー。
+// クロール開始・中止は 409（実行中/実行中でない）・429（レート制限）を
+// 「失敗」と区別して表示する必要があるため、ステータスで判別できるようにする。
+export class ApiError extends Error {
+  readonly status: number;
+  readonly body: Record<string, unknown> | null;
+  constructor(status: number, message: string, body: Record<string, unknown> | null) {
+    super(message);
+    this.status = status;
+    this.body = body;
+  }
+}
+
+async function send<T>(path: string, init: RequestInit): Promise<T> {
+  const res = await request(path, init);
+  let body: Record<string, unknown> | null = null;
+  try {
+    body = (await res.json()) as Record<string, unknown>;
+  } catch {
+    // 本文が JSON でない（または空）
+  }
+  if (!res.ok) {
+    // error は文字列のほか、入力検証エラー(400)では zod の flatten 結果（オブジェクト）の場合がある
+    const message = typeof body?.error === "string"
+      ? body.error
+      : res.status === 400 ? "入力内容が正しくありません。" : `HTTP ${res.status}`;
+    throw new ApiError(res.status, message, body);
+  }
+  return body as T;
 }
 
 export const api = {
   listCrawls: () => get<CrawlSummary[]>("/api/crawls"),
   getCrawl: (id: string) => get<CrawlSummary>(`/api/crawls/${id}`),
   startCrawl: (body: { startUrl: string; maxDepth?: number; label?: string; render?: boolean }) =>
-    request("/api/crawls", {
+    send<{ id: string; status: string }>("/api/crawls", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    }).then((r) => r.json() as Promise<{ id: string; status: string }>),
+    }),
   recrawl: (id: string) =>
-    request(`/api/crawls/${id}/recrawl`, { method: "POST" }).then((r) => r.json() as Promise<{ id: string; status: string }>),
+    send<{ id: string; status: string }>(`/api/crawls/${id}/recrawl`, { method: "POST" }),
+  // 202 { status: "cancelling" | "saving" }。完了は進捗 SSE の done で通知される
+  cancelCrawl: (id: string) =>
+    send<{ id: string; status: "cancelling" | "saving" }>(`/api/crawls/${id}/cancel`, { method: "POST" }),
   setActive: (id: string) =>
     request(`/api/crawls/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ active: true }),
     }).then((r) => r.json() as Promise<CrawlSummary>),
+  // 実行中のクロールは 409 { error, status } で拒否される（ApiError で投げる）
   deleteCrawl: (id: string) =>
-    request(`/api/crawls/${id}`, { method: "DELETE" }).then((r) => {
-      if (!r.ok) throw new Error(`delete ${id}: HTTP ${r.status}`);
-    }),
+    send<null>(`/api/crawls/${id}`, { method: "DELETE" }).then(() => undefined),
 
   pages: (id: string) => get<PageNode[]>(`/api/crawls/${id}/pages`),
   page: (id: string, pageId: string) => get<PageDetail>(`/api/crawls/${id}/pages/${pageId}`),
-  tree: (id: string) => get<PageTreeNode | null>(`/api/crawls/${id}/tree`),
-  links: (id: string) => get<{ nodes: PageNode[]; edges: Edge[] }>(`/api/crawls/${id}/links`),
+  // edges のみ（ノードは pages で取得済みの flat を使う）。リンク画面を開いたときに遅延取得する。
+  links: (id: string) => get<{ edges: Edge[] }>(`/api/crawls/${id}/links`),
+  linksCount: (id: string) => get<{ count: number }>(`/api/crawls/${id}/links/count`),
   summary: (id: string) => get<AnalysisSummary>(`/api/crawls/${id}/summary`),
   errors: (id: string) => get<PageNode[]>(`/api/crawls/${id}/issues/errors`),
   redirects: (id: string) => get<RedirectChain[]>(`/api/crawls/${id}/issues/redirects`),
@@ -59,19 +95,21 @@ export const api = {
 };
 
 /* ---- composite loader: builds a SiteData bundle for the active crawl ---- */
+// 全ページを含む巨大レスポンスはサーバーのメモリ（Prisma エンジン）を大きく消費するため、
+// 初期ロードでは pages を1回だけ取得し、ツリーはその flat からクライアント側で組み立てる。
+// edges はリンク画面でのみ使うので遅延取得し（SiteContext の ensureEdges）、ここでは件数だけ取る。
 export async function loadSite(crawlId: string): Promise<SiteData> {
-  const [crawl, flat, tree, linkGraph, summary] = await Promise.all([
+  const [crawl, flat, edgeCount, summary] = await Promise.all([
     api.getCrawl(crawlId),
     api.pages(crawlId),
-    api.tree(crawlId),
-    api.links(crawlId),
+    api.linksCount(crawlId).then((r) => r.count),
     api.summary(crawlId),
   ]);
   return {
     crawl,
-    tree,
+    tree: buildTree(flat),
     flat,
-    edges: linkGraph.edges,
+    edgeCount,
     summary,
     host: crawl.host,
     counts: {
@@ -86,25 +124,69 @@ export async function loadSite(crawlId: string): Promise<SiteData> {
   };
 }
 
+// 進捗 SSE の接続状態。
+//   open        : 接続中（再接続に成功した場合も通知される）
+//   reconnecting: 接続が切れ、再接続を待っている（プロキシのアイドル切断・一時的なネットワーク断など）
+export type ProgressConnection = "open" | "reconnecting";
+
+// EventSource が再接続を諦めた（readyState=CLOSED。HTTP エラー応答など）ときに自前で張り直す間隔
+const RECONNECT_MIN_MS = 5_000;
+const RECONNECT_MAX_MS = 60_000;
+
+// 進捗 SSE を購読する。
+// 注意: EventSource の "error" イベントは2種類ある。
+//   - サーバーが送る `event: error`（クロール失敗。MessageEvent で data あり）→ onEvent("error", data)
+//   - 接続エラー（data なしの Event）→ クロール失敗ではない。EventSource の自動再接続に任せ、
+//     onConnection("reconnecting") で通知するだけにする（以前はこれをクロール失敗として扱い、
+//     購読を止めてしまっていたため、一時的な切断で進捗表示が消え、完了しても再読込されなかった）。
 export function subscribeProgress(
   crawlId: string,
-  onEvent: (type: string, data: unknown) => void
+  onEvent: (type: string, data: unknown) => void,
+  onConnection?: (state: ProgressConnection) => void
 ): () => void {
-  const es = new EventSource(api.progressUrl(crawlId), { withCredentials: true });
-  const types = ["progress", "status", "done", "error"];
-  const handlers = types.map((t) => {
-    const h = (e: MessageEvent) => {
-      try {
-        onEvent(t, JSON.parse(e.data));
-      } catch {
-        onEvent(t, e.data);
-      }
+  let es: EventSource | null = null;
+  let disposed = false;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let retryMs = RECONNECT_MIN_MS;
+
+  const dispatch = (t: string) => (e: Event) => {
+    const data = (e as MessageEvent).data;
+    if (t === "error" && (typeof data !== "string" || data === "")) return; // 接続エラーは onerror 側で扱う
+    try {
+      onEvent(t, JSON.parse(data));
+    } catch {
+      onEvent(t, data);
+    }
+  };
+
+  const connect = () => {
+    if (disposed) return;
+    const src = new EventSource(api.progressUrl(crawlId), { withCredentials: true });
+    es = src;
+    for (const t of ["progress", "status", "done", "error"]) src.addEventListener(t, dispatch(t));
+    src.onopen = () => {
+      retryMs = RECONNECT_MIN_MS;
+      onConnection?.("open");
     };
-    es.addEventListener(t, h as EventListener);
-    return [t, h] as const;
-  });
+    src.onerror = (e) => {
+      if (disposed) return;
+      const data = (e as MessageEvent).data;
+      if (typeof data === "string" && data !== "") return; // サーバー発の error イベント（dispatch 側で処理済み）
+      onConnection?.("reconnecting");
+      if (src.readyState === EventSource.CLOSED) {
+        // ブラウザが再接続を諦めた場合は、間隔を空けて自前で張り直す
+        src.close();
+        retryTimer = setTimeout(connect, retryMs);
+        retryMs = Math.min(retryMs * 2, RECONNECT_MAX_MS);
+      }
+      // CONNECTING の場合はブラウザが自動で再接続する
+    };
+  };
+  connect();
+
   return () => {
-    handlers.forEach(([t, h]) => es.removeEventListener(t, h as EventListener));
-    es.close();
+    disposed = true;
+    if (retryTimer) clearTimeout(retryTimer);
+    es?.close();
   };
 }

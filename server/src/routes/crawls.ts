@@ -1,8 +1,16 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import { prisma } from "../db.js";
 import { toCrawlDTO } from "../serialize.js";
-import { startCrawl, recrawl, crawlEvents, isRunning, StartCrawlValidationError } from "../crawler/manager.js";
+import {
+  startCrawl,
+  recrawl,
+  cancelCrawl,
+  crawlEvents,
+  isRunning,
+  StartCrawlValidationError,
+  CrawlAlreadyRunningError,
+} from "../crawler/manager.js";
 
 // startUrl はこの時点では「形式」だけを検証する(URLとしてパース可能 かつ http/https スキームか)。
 // プライベートIP/メタデータ等への到達可否はDNS解決を伴うため、ここでは行わず
@@ -25,7 +33,9 @@ const createSchema = z.object({
   startUrl: startUrlSchema,
   maxDepth: z.number().int().min(0).max(10).default(3),
   label: z.string().optional(),
-  render: z.boolean().optional(),
+  // JSレンダリング（Playwright）は撤去済み。旧クライアントが送る render を 400 にしないよう
+  // 後方互換のため受け付けるが、値は使わない（startCrawl へは渡さない）。
+  render: z.unknown().optional(),
 });
 
 const patchSchema = z.object({
@@ -46,6 +56,17 @@ const ACTIVE_COOKIE_OPTS = {
   secure: process.env.NODE_ENV === "production",
 };
 
+// クロール開始系（新規・再クロール）の共通レート制限。
+// クロール起動は重い処理のため、グローバルのレート制限より厳しく絞る
+const START_RATE_LIMIT = { max: 5, timeWindow: "1 minute" };
+// 中止は軽い処理だが、連打やスクリプトからの大量送信を抑えるため緩めに制限する
+const CANCEL_RATE_LIMIT = { max: 30, timeWindow: "1 minute" };
+
+// 同時実行中のため開始できなかった場合の 409 応答
+function sendAlreadyRunning(reply: FastifyReply, err: CrawlAlreadyRunningError) {
+  return reply.code(409).send({ error: err.message, runningId: err.runningId });
+}
+
 function withCookieActive<T extends { id: string; active: boolean }>(dto: T, cookieActiveId: string | null): T {
   if (cookieActiveId === null) return dto;
   return dto.id === cookieActiveId ? { ...dto, active: true } : { ...dto, active: false };
@@ -59,18 +80,19 @@ export async function registerCrawlRoutes(app: FastifyInstance) {
   });
 
   app.post("/api/crawls", {
-    // クロール起動はChromiumプロセス起動を伴う重い処理のため、グローバルのレート制限より厳しく絞る
-    config: { rateLimit: { max: 5, timeWindow: "1 minute" } },
+    config: { rateLimit: START_RATE_LIMIT },
   }, async (req, reply) => {
     const parsed = createSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
     try {
-      const { id } = await startCrawl(parsed.data);
+      const { startUrl, maxDepth, label } = parsed.data;
+      const { id } = await startCrawl({ startUrl, maxDepth, label });
       return reply.code(202).send({ id, status: "running" });
     } catch (err) {
       if (err instanceof StartCrawlValidationError) {
         return reply.code(400).send({ error: err.message });
       }
+      if (err instanceof CrawlAlreadyRunningError) return sendAlreadyRunning(reply, err);
       throw err;
     }
   });
@@ -135,6 +157,12 @@ export async function registerCrawlRoutes(app: FastifyInstance) {
 
   app.delete("/api/crawls/:id", async (req, reply) => {
     const { id } = req.params as { id: string };
+    // 実行中（開始受付〜保存完了まで）のクロールは削除させない。行だけ消すと取得は続き、
+    // 保存時に外部キー違反で失敗するまで（最長で時間上限の60分）実行枠が埋まったままになるため。
+    // 判定は manager の実行中マップを正とする（DB の status は参照しない）。
+    if (isRunning(id)) {
+      return reply.code(409).send({ error: "実行中のクロールは削除できません。中止してから削除してください。", status: "running" });
+    }
     const existing = await prisma.crawl.findUnique({ where: { id } });
     if (!existing) return reply.code(404).send({ error: "not found" });
     await prisma.crawl.delete({ where: { id } });
@@ -147,7 +175,9 @@ export async function registerCrawlRoutes(app: FastifyInstance) {
     return reply.code(204).send();
   });
 
-  app.post("/api/crawls/:id/recrawl", async (req, reply) => {
+  app.post("/api/crawls/:id/recrawl", {
+    config: { rateLimit: START_RATE_LIMIT },
+  }, async (req, reply) => {
     const { id } = req.params as { id: string };
     try {
       const result = await recrawl(id);
@@ -157,7 +187,21 @@ export async function registerCrawlRoutes(app: FastifyInstance) {
       if (err instanceof StartCrawlValidationError) {
         return reply.code(400).send({ error: err.message });
       }
+      if (err instanceof CrawlAlreadyRunningError) return sendAlreadyRunning(reply, err);
       throw err;
     }
+  });
+
+  // 実行中のクロールを中止する。取得済みの結果は truncated として保存され、
+  // 完了は既存の進捗 SSE（/progress）の done イベントで通知される。
+  app.post("/api/crawls/:id/cancel", {
+    config: { rateLimit: CANCEL_RATE_LIMIT },
+  }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const result = cancelCrawl(id);
+    if (result) return reply.code(202).send({ id, status: result });
+    const existing = await prisma.crawl.findUnique({ where: { id }, select: { status: true } });
+    if (!existing) return reply.code(404).send({ error: "not found" });
+    return reply.code(409).send({ error: "このクロールは実行中ではないため中止できません。", status: existing.status });
   });
 }

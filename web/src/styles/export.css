@@ -55,3 +55,14 @@
 .ex-actions .btn.primary { height: 38px; padding: 0 16px; font-size: 13.5px; }
 .ex-actions .btn:disabled { opacity: .5; pointer-events: none; }
 .ex-flash { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; color: var(--ok); }
+
+/* 未完了クロールのためエクスポートできない場合の案内 */
+.ex-pending-note {
+  display: flex; align-items: center; gap: 9px; margin: 0 0 16px; padding: 11px 14px;
+  background: var(--warn-weak); color: #9a5b06; border: 1px solid #f5d08a;
+  border-radius: var(--r-md); font-size: 12.5px; line-height: 1.5;
+}
+.ex-item .btn:disabled { opacity: .5; pointer-events: none; }
+/* ダウンロード中・失敗の表示 */
+.ex-busy { font-size: 13px; font-weight: 600; color: var(--text-2); }
+.ex-error { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 600; color: var(--err); line-height: 1.5; }
