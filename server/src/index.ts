@@ -1,4 +1,5 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import Fastify from "fastify";
@@ -9,7 +10,7 @@ import rateLimit from "@fastify/rate-limit";
 import staticPlugin from "@fastify/static";
 import compress from "@fastify/compress";
 import basicAuth from "@fastify/basic-auth";
-import type { FastifyInstance } from "fastify";
+import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { prisma } from "./db.js";
 import { recoverOrphanedCrawls, getRunningCrawlId, cancelCrawl } from "./crawler/manager.js";
 import { registerCrawlRoutes } from "./routes/crawls.js";
@@ -157,7 +158,20 @@ async function main() {
   // "request completed")を下のフックで出力する。
   // 注意: disableRequestLogging は標準エラーハンドラのエラーログ(5xx のスタック等)も止めるため、
   // 5xx の原因は下の onError フックで別途出力する。
-  const app = Fastify({ logger: true, trustProxy: TRUST_PROXY, disableRequestLogging: true });
+  // frameworkErrors: ルーティング前に検出される不正なURL(デコードできないパーセントエンコード等)を
+  // 一律 400 で閉じる。Fastify 4 の既定でも 400 だが、エラー本文にリクエストパスをそのまま埋め込むため
+  // 固定文言にしておく。この時点では認証(onRequest)より前なので、未認証者にも同じ 400 が返る。
+  // (ルートが1つも無いメソッドの不正URLはここを通らず not-found ハンドラーへ直行する。
+  //  そちらの対策は下の setNotFoundHandler 参照)
+  const app = Fastify({
+    logger: true,
+    trustProxy: TRUST_PROXY,
+    disableRequestLogging: true,
+    frameworkErrors: (err: FastifyError, _req: FastifyRequest, reply: FastifyReply) => {
+      if (err.code === "FST_ERR_BAD_URL") return reply.code(400).send({ error: "bad request" });
+      return reply.code(500).send({ error: "internal server error" });
+    },
+  });
   appForShutdown = app;
   const isApiRequest = (url: string) => url === "/api" || url.startsWith("/api/") || url.startsWith("/api?");
   // レート制限・Basic認証より前に登録し、それらで弾かれたAPIリクエストも従来どおり記録する
@@ -247,13 +261,103 @@ async function main() {
       }
     },
   });
+  // SPAフォールバック兼 404 応答。
+  // 注意(CVE-2026-76169 / GHSA-p68q-wchp-6fh7): Fastify 4 では「ルートが1つも登録されていないメソッド」
+  // (PUT 等)で不正なURLが来ると、このハンドラーが onRequest / preHandler フックを一切通らずに直接呼ばれる
+  // (= 上の Basic 認証フックがスキップされる)。v4 系には修正版が無いため、このハンドラー自体を
+  // 「ライフサイクル外から呼ばれても安全」に作る:
+  //  - 冒頭で Basic 認証を自前で検証する(検証は @fastify/basic-auth の app.basicAuth をそのまま呼び、
+  //    ヘッダの解釈・validate・401 応答の形を通常経路と共有する。通常経路では認証済みなので二重検証になるが無害)
+  //  - reply.sendFile 等のプラグインのデコレーターに依存しない(その経路の reply には付いておらず、
+  //    呼ぶと未捕捉の TypeError でプロセスごと落ちていた)
+  //  - 例外を外へ投げない(その経路では Fastify が例外を捕捉しないため)
+  // 恒久対応は Fastify 5.12.2 以上への更新。
   app.setNotFoundHandler((req, reply) => {
-    const url = new URL(req.url, "http://internal");
-    if (url.pathname.startsWith("/api/")) return reply.code(404).send({ error: "not found" });
-    return reply.sendFile("index.html");
+    handleNotFound(app, req, reply).catch((err) => {
+      req.log.error({ err }, "not-found handler failed");
+      try {
+        if (!reply.sent) reply.code(500).send({ error: "internal server error" });
+      } catch {
+        // 応答も送れない場合は何もしない(プロセスを落とさないことを優先)
+      }
+    });
   });
 
   await app.listen({ port: PORT, host: "0.0.0.0" });
+}
+
+// SPA の index.html。sendFile を使わずメモリから返すため、初回に読み込んで保持する。
+// web のビルド成果物が無い開発時でも起動できるよう、読めなければ null のままにして次回また読みにいく。
+let indexHtml: { body: string; etag: string } | null = null;
+async function loadIndexHtml(): Promise<{ body: string; etag: string } | null> {
+  if (indexHtml) return indexHtml;
+  try {
+    const body = await readFile(path.join(PUBLIC_DIR, "index.html"), "utf8");
+    // no-cache で毎回再検証させるため ETag を付ける(従来の sendFile と同様に 304 を返せるように)
+    const etag = `"${createHash("sha1").update(body).digest("base64url")}"`;
+    indexHtml = { body, etag };
+  } catch {
+    return null;
+  }
+  return indexHtml;
+}
+
+// @fastify/basic-auth の検証(app.basicAuth)を Promise 化したもの。失敗時はその Error(statusCode 401、
+// WWW-Authenticate ヘッダは設定済み)を返し、成功時は undefined。
+function checkBasicAuth(app: FastifyInstance, req: FastifyRequest, reply: FastifyReply): Promise<Error | undefined> {
+  return new Promise((resolve) => {
+    app.basicAuth(req, reply, (err?: Error) => resolve(err ?? undefined));
+  });
+}
+
+// URL のパス部分がデコードできるか(find-my-way がルーティング時に行うデコードと同等の判定)
+function isDecodablePath(rawUrl: string): boolean {
+  const q = rawUrl.indexOf("?");
+  try {
+    decodeURI(q === -1 ? rawUrl : rawUrl.slice(0, q));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function handleNotFound(app: FastifyInstance, req: FastifyRequest, reply: FastifyReply): Promise<void> {
+  // 1. 認証。不正URLの判定より先に行い、未認証者にはURLの正否に関わらず 401 だけを返す
+  //    (未認証者に与える情報を増やさないため)。
+  const authErr = await checkBasicAuth(app, req, reply);
+  if (authErr) {
+    // 通常経路と同じ標準エラーハンドラーで 401 を返す(本文・ステータス・onResponse の 401 ログが揃う)
+    reply.send(authErr);
+    return;
+  }
+  // 2. デコードできないURLは 400(frameworkErrors と同じ応答)
+  if (!isDecodablePath(req.url)) {
+    reply.code(400).send({ error: "bad request" });
+    return;
+  }
+  // 3. SPA フォールバックは GET/HEAD のみ。/api/ 配下とその他のメソッドは JSON の 404。
+  let pathname: string;
+  try {
+    pathname = new URL(req.url, "http://internal").pathname;
+  } catch {
+    reply.code(400).send({ error: "bad request" });
+    return;
+  }
+  if (pathname.startsWith("/api/") || (req.method !== "GET" && req.method !== "HEAD")) {
+    reply.code(404).send({ error: "not found" });
+    return;
+  }
+  const html = await loadIndexHtml();
+  if (!html) {
+    reply.code(404).send({ error: "not found" });
+    return;
+  }
+  reply.header("Cache-Control", "no-cache").header("ETag", html.etag);
+  if (req.headers["if-none-match"] === html.etag) {
+    reply.code(304).send();
+    return;
+  }
+  reply.type("text/html; charset=utf-8").send(html.body);
 }
 
 main().catch((err) => {
