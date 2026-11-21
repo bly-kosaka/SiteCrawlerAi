@@ -4,7 +4,7 @@
    ============================================================ */
 import React from "react";
 import { Icon } from "../components/icons";
-import { statusOf, lastSeg, ISSUE_META, ISSUE_HINT, buildPathTree } from "../lib/common";
+import { statusOf, lastSeg, ISSUE_META, ISSUE_HINT, buildPathTree, truncationNotice } from "../lib/common";
 import { useSite } from "../lib/SiteContext";
 import { api } from "../lib/api";
 import type { PageNode, PageTreeNode } from "../lib/types";
@@ -279,7 +279,9 @@ export interface SitemapScreenProps {
 }
 
 export function SitemapScreen({ treeMode, treeBasis, onTreeBasisChange, detailMode }: SitemapScreenProps) {
-  const { site } = useSite();
+  const { site, stopReasons } = useSite();
+  // 打ち切り理由はこのタブで完了を見届けたときだけ分かる（それ以外は汎用文言）
+  const truncation = site?.crawl.truncated ? truncationNotice(stopReasons[site.crawl.id], site.crawl.pages) : null;
   const flat = site?.flat ?? [];
   // 「リンク構造」= クロールで発見した経路をそのまま親子関係とするツリー（site.tree）
   // 「URLディレクトリ」= URLパスの上位セグメントに対応する既存ページを親とみなすツリー
@@ -385,10 +387,10 @@ export function SitemapScreen({ treeMode, treeBasis, onTreeBasisChange, detailMo
           <button className="btn ghost icon sm" title="すべて折りたたむ" onClick={collapseAll}><Icon.expand size={15} style={{ transform: "rotate(180deg)" }} /></button>
         </div>
 
-        {site?.crawl.truncated && (
-          <div className="sm-truncated-banner">
+        {truncation && (
+          <div className={"sm-truncated-banner" + (truncation.cls === "info" ? " info" : "")}>
             <Icon.errors size={14} />
-            クロールが途中で打ち切られました。{site.crawl.pages.toLocaleString()} 件のみ取得済です。再クロールで改善することがあります。
+            {truncation.text}
           </div>
         )}
 

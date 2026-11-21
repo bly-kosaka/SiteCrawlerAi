@@ -100,3 +100,19 @@
 .db-tool-name { font-size: 14px; font-weight: 650; display: flex; align-items: center; gap: 6px; }
 .db-tool-desc { font-size: 12px; color: var(--text-3); line-height: 1.5; }
 .db-tool .go { margin-top: auto; font-size: 12px; color: var(--primary); font-weight: 600; display: inline-flex; align-items: center; gap: 4px; }
+
+/* progress: 右側（％と中止ボタン） */
+.db-prog-right { display: inline-flex; align-items: center; gap: 10px; }
+.db-prog-top .stopping { color: var(--text-2); font-weight: 600; }
+
+/* 中止による打ち切りは警告ではなく通常の情報表示 */
+.db-truncated-note.info { background: var(--info-weak); color: #0772a8; border-color: var(--info-weak); }
+
+/* 実行中のクロールは削除不可（ボタンは無効化し、外側の span に理由のツールチップ） */
+.cl-del-wrap { display: inline-flex; flex: none; }
+.cl-del:disabled { cursor: not-allowed; }
+.cl-row:hover .cl-del:disabled { opacity: .35; }
+.cl-del:disabled:hover { background: none; color: var(--text-3); }
+
+/* 進捗 SSE の再接続中表示 */
+.db-prog-reconnect { color: var(--warn); font-weight: 600; }

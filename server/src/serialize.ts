@@ -103,6 +103,8 @@ export function toCrawlDTO(c: DbCrawl): CrawlDTO {
 }
 
 // flat + parent から木構造を構築（フロントの TREE 互換）
+// 同じロジックをフロント側（web/src/lib/common.ts の buildTree）にも持っている。
+// 片方を変える場合はもう片方も合わせること（エクスポートのツリーと画面のツリーがずれるため）。
 export interface PageTreeNode extends PageDTO {
   children?: PageTreeNode[];
 }

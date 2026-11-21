@@ -5,14 +5,49 @@
    ============================================================ */
 import React from "react";
 import { Icon } from "../components/icons";
-import { useSite } from "../lib/SiteContext";
+import { useSite, type CrawlRunState } from "../lib/SiteContext";
+import { truncationNotice } from "../lib/common";
 
 export interface DashboardScreenProps {
   onNavigate: (page: string) => void;
 }
 
+// 実行中クロールの進捗表示と中止ボタン。
+// 中止を押した後は二重押しできないよう無効化し、完了（SSE の done）を待つ間は状態を文言で示す。
+function CrawlProgressPanel({ run, onCancel }: { run: CrawlRunState; onCancel: () => void }) {
+  const stopping = run.cancel !== "none";
+  const stoppingText = run.cancel === "saving"
+    ? "取得は完了しています。結果を保存中です…"
+    : "中止しています…（取得済みの結果を保存中）";
+  return (
+    <div className="db-progress">
+      <div className="db-prog-top">
+        {stopping
+          ? <span className="stopping">{stoppingText}</span>
+          : <span style={{ color: "var(--text-2)" }}>クロール中 <span className="mono">{run.url}{run.cur || ""}</span></span>}
+        <span className="db-prog-right">
+          <b>{Math.round(run.pct)}%</b>
+          <button className="btn sm" onClick={onCancel} disabled={stopping} title="クロールを中止し、それまでに取得した結果を保存します">
+            {stopping ? "中止中…" : <><Icon.close size={12} /> 中止</>}
+          </button>
+        </span>
+      </div>
+      <div className="db-prog-bar"><div className="db-prog-fill" style={{ width: run.pct + "%" }} /></div>
+      <div className="db-prog-meta">
+        <span>発見 URL <b>{run.found}</b> / {run.total}</span>
+        <span>キュー <b>{run.queue}</b></span>
+        <span>速度 <b>~{run.speed}</b> URL/s</span>
+        {run.conn === "reconnecting" && (
+          // 進捗の通知が一時的に途切れている（クロール自体は継続中のことが多い）。自動で再接続する
+          <span className="db-prog-reconnect">進捗の受信が途切れました。再接続中…</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
-  const { crawls, activeId, setActiveId, startCrawl, deleteCrawl, crawlRun, site } = useSite();
+  const { crawls, activeId, setActiveId, startCrawl, cancelCrawl, deleteCrawl, crawlRun, site, stopReasons } = useSite();
   const [url, setUrl] = React.useState("");
   const [depth, setDepth] = React.useState("3");
 
@@ -60,20 +95,8 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
                 {crawlRun ? <><Icon.refresh size={15} /> 解析中…</> : <><Icon.refresh size={15} /> クロール開始</>}
               </button>
             </div>
-            {crawlRun && (
-              <div className="db-progress">
-                <div className="db-prog-top">
-                  <span style={{ color: "var(--text-2)" }}>クロール中 <span className="mono">{crawlRun.url}{crawlRun.cur || ""}</span></span>
-                  <b>{Math.round(crawlRun.pct)}%</b>
-                </div>
-                <div className="db-prog-bar"><div className="db-prog-fill" style={{ width: crawlRun.pct + "%" }} /></div>
-                <div className="db-prog-meta">
-                  <span>発見 URL <b>{crawlRun.found}</b> / {crawlRun.total}</span>
-                  <span>キュー <b>{crawlRun.queue}</b></span>
-                  <span>速度 <b>~{crawlRun.speed}</b> URL/s</span>
-                </div>
-              </div>
-            )}
+            {crawlRun && <CrawlProgressPanel run={crawlRun} onCancel={cancelCrawl} />}
+
           </div>
           <div className="pane-sub" style={{ padding: 24, textAlign: "center" }}>クロール結果がありません。上のフォームから新規クロールを開始してください。</div>
         </div>
@@ -131,28 +154,20 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
             </button>
           </div>
 
-          {crawlRun && (
-            <div className="db-progress">
-              <div className="db-prog-top">
-                <span style={{ color: "var(--text-2)" }}>クロール中 <span className="mono">{crawlRun.url}{crawlRun.cur || ""}</span></span>
-                <b>{Math.round(crawlRun.pct)}%</b>
-              </div>
-              <div className="db-prog-bar"><div className="db-prog-fill" style={{ width: crawlRun.pct + "%" }} /></div>
-              <div className="db-prog-meta">
-                <span>発見 URL <b>{crawlRun.found}</b> / {crawlRun.total}</span>
-                <span>キュー <b>{crawlRun.queue}</b></span>
-                <span>速度 <b>~{crawlRun.speed}</b> URL/s</span>
-              </div>
-            </div>
-          )}
+          {crawlRun && <CrawlProgressPanel run={crawlRun} onCancel={cancelCrawl} />}
+
         </div>
 
-        {active.truncated && (
-          <div className="db-truncated-note">
-            <Icon.errors size={15} />
-            <span>このクロールは途中で打ち切られました（{active.pages.toLocaleString()} 件取得済）。サイト全体を網羅していない可能性があります。再クロールすると改善することがあります。</span>
-          </div>
-        )}
+        {active.truncated && (() => {
+          // 理由はこのタブで完了を見届けたときだけ分かる。それ以外は汎用文言
+          const tn = truncationNotice(stopReasons[active.id], active.pages);
+          return (
+            <div className={"db-truncated-note" + (tn.cls === "info" ? " info" : "")}>
+              <Icon.errors size={15} />
+              <span>{tn.text}</span>
+            </div>
+          );
+        })()}
 
         {/* ===== KPI ===== */}
         <div className="db-sec-h"><h2>{active.host} の概要</h2><span className="pane-sub">最終クロール {active.when}</span></div>
@@ -193,12 +208,25 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
                 <div className="cl-tx">
                   <div className="cl-host">
                     {c.host}
-                    {c.truncated && <span className="badge warn" style={{ marginLeft: 6, fontSize: 10, height: 16 }}>打ち切り</span>}
+                    {c.truncated && (stopReasons[c.id] === "cancel"
+                      ? <span className="badge info" style={{ marginLeft: 6, fontSize: 10, height: 16 }}>中止</span>
+                      : <span className="badge warn" style={{ marginLeft: 6, fontSize: 10, height: 16 }}>打ち切り</span>)}
+                    {(c.status === "running" || c.status === "queued") && <span className="badge info" style={{ marginLeft: 6, fontSize: 10, height: 16 }}>実行中</span>}
                   </div>
                   <div className="cl-meta">{c.label} ・ {c.pages} URL ・ {c.when}</div>
                 </div>
                 <button className="cl-open" onClick={(e) => { e.stopPropagation(); setActiveId(c.id); onNavigate("sitemap"); }}>開く →</button>
-                <button className="cl-del" title="このクロール結果を削除" onClick={(e) => { e.stopPropagation(); doDelete(c); }}><Icon.close size={13} /></button>
+                {(() => {
+                  // 実行中（running/queued）のクロールはサーバーが削除を拒否する（409）ため、ボタンを無効化して理由を示す。
+                  // disabled のボタンはツールチップが出ないブラウザがあるため、title は外側の span に付ける
+                  const running = c.status === "running" || c.status === "queued";
+                  return (
+                    <span className="cl-del-wrap" title={running ? "実行中は削除できません。先に中止してください" : "このクロール結果を削除"} onClick={(e) => e.stopPropagation()}>
+                      <button className="cl-del" disabled={running} aria-label={running ? "実行中は削除できません" : "このクロール結果を削除"}
+                        onClick={(e) => { e.stopPropagation(); doDelete(c); }}><Icon.close size={13} /></button>
+                    </span>
+                  );
+                })()}
                 <div className="cl-health">
                   <div className="cl-health-v" style={{ color: c.health >= 90 ? "var(--ok)" : c.health >= 80 ? "var(--warn)" : "var(--err)" }}>{c.health}</div>
                   <div className="cl-health-l">健全性</div>

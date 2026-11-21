@@ -1,9 +1,12 @@
 import { request } from "undici";
 import { assertPublicHost, SsrfBlockedError, type HostPinCache } from "./ssrf.js";
+import { FETCH_TIMEOUT_MS, MAX_BODY_BYTES, readBodyLimited } from "./fetcher.js";
 
 interface RobotsRule {
   type: "allow" | "disallow";
   pattern: string;
+  // pattern をパース時に1回だけコンパイルしたもの（判定のたびに new RegExp しないため）
+  regex: RegExp;
 }
 
 interface RobotsRules {
@@ -33,7 +36,7 @@ function patternToRegex(pattern: string): RegExp {
   return new RegExp("^" + escaped + (endsWithDollar ? "$" : ""));
 }
 
-async function fetchRobots(origin: string, cache: RobotsCache, pinCache?: HostPinCache): Promise<RobotsRules | null> {
+async function fetchRobots(origin: string, cache: RobotsCache, pinCache?: HostPinCache, signal?: AbortSignal): Promise<RobotsRules | null> {
   if (cache.has(origin)) return cache.get(origin)!;
   let result: RobotsRules | null = null;
   try {
@@ -42,9 +45,25 @@ async function fetchRobots(origin: string, cache: RobotsCache, pinCache?: HostPi
     // （pinCacheでDNSリバインディングの変化検知も適用する。詳しくは ssrf.ts 参照）。
     // これを怠ると、ここだけがSSRF対策の素通りルートになってしまう。
     await assertPublicHost(new URL(origin).hostname, pinCache);
-    const res = await request(`${origin}/robots.txt`, { method: "GET" });
-    if (res.statusCode === 200) {
-      const text = await res.body.text();
+    // 応答しないサーバーで最初のページ取得前に止まり続けないよう、通常の取得と同じタイムアウトを設ける
+    const res = await request(`${origin}/robots.txt`, {
+      method: "GET",
+      headersTimeout: FETCH_TIMEOUT_MS,
+      bodyTimeout: FETCH_TIMEOUT_MS,
+      signal,
+    });
+    if (res.statusCode !== 200) {
+      // 本文を読み残すと接続が解放されないため、使わない本文も必ず破棄する
+      await res.body.dump();
+    } else {
+      // 上限を超える robots.txt は先頭から上限までを解析する（Google も上限以降の内容を無視する仕様）。
+      // 途中で切れた最終行は誤ったパターンになり得るため捨てる。
+      const body = await readBodyLimited(res.body, res.headers["content-length"], MAX_BODY_BYTES, "truncate");
+      let text = body.text;
+      if (body.truncated) {
+        text = text.slice(0, Math.max(0, text.lastIndexOf("\n")));
+        console.warn(`[robots] ${origin} の robots.txt が上限を超えたため先頭 ${MAX_BODY_BYTES} バイトまでを解析します`);
+      }
       const rules: RobotsRule[] = [];
       const sitemaps: string[] = [];
       let applies = false;
@@ -61,7 +80,7 @@ async function fetchRobots(origin: string, cache: RobotsCache, pinCache?: HostPi
           const m = line.match(/^(disallow|allow):\s*(.*)$/i)!;
           const pattern = m[2].trim();
           // 空の Disallow: は「全許可」を意味する慣習があるため、ルールとして登録しない
-          if (pattern) rules.push({ type: m[1].toLowerCase() as "allow" | "disallow", pattern });
+          if (pattern) rules.push({ type: m[1].toLowerCase() as "allow" | "disallow", pattern, regex: patternToRegex(pattern) });
         }
       }
       result = { rules, sitemaps };
@@ -84,7 +103,7 @@ async function fetchRobots(origin: string, cache: RobotsCache, pinCache?: HostPi
 function isAllowedByRules(path: string, rules: RobotsRule[]): boolean {
   let best: RobotsRule | null = null;
   for (const rule of rules) {
-    if (!patternToRegex(rule.pattern).test(path)) continue;
+    if (!rule.regex.test(path)) continue;
     if (
       !best ||
       rule.pattern.length > best.pattern.length ||
@@ -96,9 +115,16 @@ function isAllowedByRules(path: string, rules: RobotsRule[]): boolean {
   return !best || best.type === "allow";
 }
 
-export async function isAllowedByRobots(origin: string, path: string, respect: boolean, cache: RobotsCache, pinCache?: HostPinCache): Promise<boolean> {
+export async function isAllowedByRobots(
+  origin: string,
+  path: string,
+  respect: boolean,
+  cache: RobotsCache,
+  pinCache?: HostPinCache,
+  signal?: AbortSignal
+): Promise<boolean> {
   if (!respect) return true;
-  const robots = await fetchRobots(origin, cache, pinCache);
+  const robots = await fetchRobots(origin, cache, pinCache, signal);
   if (!robots) return true;
   return isAllowedByRules(path, robots.rules);
 }

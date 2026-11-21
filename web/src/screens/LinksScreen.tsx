@@ -105,12 +105,26 @@ type DragState =
   | { mode: "pan"; sx: number; sy: number; vx: number; vy: number }
   | { mode: "node"; id: string; sx: number; sy: number; ox: number; oy: number; moved: boolean };
 
+const NO_EDGES: Edge[] = [];
+
 export function LinksScreen() {
-  const { site } = useSite();
+  const { site, linkEdges, ensureEdges } = useSite();
   const flat = site?.flat ?? [];
   const TREE = site?.tree ?? null;
-  const edges = site?.edges ?? [];
   const host = site?.host ?? "";
+  const crawlId = site?.crawl.id ?? null;
+
+  // edges はこの画面でのみ使うため、画面を開いたときに初めて取得する（取得済みなら再利用）。
+  // linkEdges が別クロールのもの、または破棄済み(idle)のときだけ取得を要求する。
+  // エラー時は自動で再試行せず、再試行ボタンに任せる。
+  const edgesForThis = linkEdges.crawlId === crawlId;
+  React.useEffect(() => {
+    if (!crawlId) return;
+    if (!edgesForThis || linkEdges.status === "idle") ensureEdges(crawlId);
+  }, [crawlId, edgesForThis, linkEdges.status, ensureEdges]);
+  const edgesReady = edgesForThis && linkEdges.status === "ready";
+  const edges = edgesReady ? linkEdges.edges : NO_EDGES;
+  const graphReady = !!TREE && edgesReady;
 
   const byId = React.useMemo(() => Object.fromEntries(flat.map((n) => [n.id, n])), [flat]);
   const [layout, setLayout] = React.useState("tree");
@@ -139,7 +153,7 @@ export function LinksScreen() {
   const forceTooLarge = layout === "force" && flat.length > FORCE_LAYOUT_MAX_NODES;
 
   React.useEffect(() => {
-    if (!TREE || !flat.length) return;
+    if (!TREE || !flat.length || !edgesReady) return;
     let p: Pos;
     if (layout === "tree") p = treeLayout(TREE);
     else if (layout === "radial") p = radialLayout(TREE);
@@ -147,8 +161,9 @@ export function LinksScreen() {
     else p = forceLayout(flat, edges, treeLayout(TREE));
     setPos(p);
     requestAnimationFrame(() => fitView(p));
-  }, [layout, TREE, flat, edges, fitView, forceTooLarge]);
+  }, [layout, TREE, flat, edges, edgesReady, fitView, forceTooLarge]);
 
+  // svg はデータ(ツリー・edges)が揃うまで描画されないため、揃った時点で wheel リスナーを付け直す
   React.useEffect(() => {
     const svg = svgRef.current; if (!svg) return;
     const onWheel = (e: WheelEvent) => {
@@ -164,7 +179,7 @@ export function LinksScreen() {
     };
     svg.addEventListener("wheel", onWheel, { passive: false });
     return () => svg.removeEventListener("wheel", onWheel);
-  }, []);
+  }, [graphReady]);
 
   const zoomBy = (f: number) => {
     const svg = svgRef.current; if (!svg) return;
@@ -217,6 +232,21 @@ export function LinksScreen() {
 
   if (!TREE) {
     return <div className="lk-layout"><div className="pane-sub" style={{ padding: 40 }}>クロールデータを読み込み中…</div></div>;
+  }
+  if (!edgesReady) {
+    const failed = edgesForThis && linkEdges.status === "error";
+    return (
+      <div className="lk-layout">
+        <div className="pane-sub" style={{ padding: 40 }}>
+          {failed ? (
+            <>
+              リンクデータの読み込みに失敗しました（{linkEdges.error}）。
+              <button className="btn sm" style={{ marginLeft: 10 }} onClick={() => crawlId && ensureEdges(crawlId)}>再試行</button>
+            </>
+          ) : "リンクデータを読み込み中…"}
+        </div>
+      </div>
+    );
   }
 
   return (

@@ -41,7 +41,7 @@ export interface CrawlSummary {
   label: string;
   startUrl: string;
   maxDepth: number;
-  status: "running" | "done" | "error";
+  status: "queued" | "running" | "done" | "error";
   pages: number;
   errors: number;
   redirects: number;
@@ -76,7 +76,8 @@ export interface SiteData {
   crawl: CrawlSummary;
   tree: PageTreeNode | null;
   flat: PageNode[];
-  edges: Edge[];
+  // edges 本体は遅延取得（useSite().ensureEdges）。ここには件数のみ持つ。
+  edgeCount: number;
   summary: AnalysisSummary;
   host: string;
   counts: {
@@ -88,6 +89,16 @@ export interface SiteData {
     noindex: number;
     dupTitles: number;
   };
+}
+
+// クロールが途中で打ち切られた理由（進捗 SSE の done イベントでのみ通知され、DB には残らない）
+//   pages: ページ数上限 / heap: メモリ保護 / time: 時間上限 / cancel: ユーザーによる中止
+export type StopReason = "pages" | "heap" | "time" | "cancel";
+
+export interface CrawlDoneEvent {
+  id: string;
+  truncated: boolean;
+  stopReason: StopReason | null;
 }
 
 export interface CrawlProgress {

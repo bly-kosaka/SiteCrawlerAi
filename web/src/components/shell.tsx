@@ -50,10 +50,12 @@ interface HeaderProps {
   crawlId: string;
   crawls: CrawlSummary[];
   onRecrawl: () => void;
+  // クロール実行中は再クロールできない（サーバーが 409 を返す）ためボタンを無効化する
+  crawlRunning: boolean;
   onSwitchCrawl: (id: string) => void;
 }
 
-export function Header({ page, host, pages, when, crawlId, crawls, onRecrawl, onSwitchCrawl }: HeaderProps) {
+export function Header({ page, host, pages, when, crawlId, crawls, onRecrawl, crawlRunning, onSwitchCrawl }: HeaderProps) {
   const titles: Record<string, string> = {
     dashboard: "ダッシュボード", sitemap: "サイトマップ", pages: "ページ一覧",
     links: "リンク構造", errors: "エラー", redirects: "リダイレクト", orphans: "孤立ページ", export: "エクスポート",
@@ -115,8 +117,8 @@ export function Header({ page, host, pages, when, crawlId, crawls, onRecrawl, on
         <Icon.settings size={16} style={{ color: "var(--text-2)" }} />
       </button>
 
-      <button className="btn primary" onClick={onRecrawl}>
-        <Icon.refresh size={15} /> 再クロール
+      <button className="btn primary" onClick={onRecrawl} disabled={crawlRunning}>
+        <Icon.refresh size={15} /> {crawlRunning ? "解析中…" : "再クロール"}
       </button>
     </div>
   );
