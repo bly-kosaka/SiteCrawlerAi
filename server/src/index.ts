@@ -30,14 +30,18 @@ const PORT = Number(process.env.PORT || 3001);
 //  - 数値(例 "1"): 接続元から数えて信頼するプロキシの段数。request.ip は X-Forwarded-For の右から
 //            その段数ぶん遡った値になり、クライアントが左側に書き足した値は無視される(推奨)
 //  - カンマ区切りの IP/CIDR(例 "10.0.0.0/8,127.0.0.1"): その範囲からの接続だけをプロキシとして信頼する
-//  - 上記以外は起動時にエラーにする(設定ミスに気付かないまま「信頼しない」に倒れるのを防ぐ)
+//  - "true"/"false" は大文字小文字と前後の空白を無視する。"0" は「信頼しない」
+//  - 上記以外(解釈できない値)は、起動を止めずに従来どおり「信頼しない」として起動し、warn を1行出す
+//    (本番の現在値が分からないまま、デプロイした瞬間に起動しなくなる事故を避けるため)
+//  - 最終的に採用した解釈は起動時に info で1行出す(デプロイ直後にログで確認できるように)
 // 注意(段数指定): Fastify 5.12 系は trustProxy に数値を渡すと「何も信頼しない」扱いにする
 // (直接つながったクライアントが段数ぶんの X-Forwarded-For を書けば偽装できるため、安全側に倒す仕様)。
 // そのため段数は「接続元から数えて n 段目までを信頼する」関数に変換して渡す(proxy-addr / Express の
 // 段数指定と同じ意味)。これが安全なのは、アプリへの接続が必ずそのプロキシを経由する(インターネットから
 // コンテナへ直接つながらない)構成の場合に限る。Railway のように公開経路がエッジプロキシだけの構成を想定。
 type TrustProxySetting = boolean | number | string[];
-const TRUST_PROXY: TrustProxySetting = parseTrustProxy(process.env.TRUST_PROXY);
+const TRUST_PROXY_PARSED = parseTrustProxy(process.env.TRUST_PROXY);
+const TRUST_PROXY: TrustProxySetting = TRUST_PROXY_PARSED.setting;
 const FASTIFY_TRUST_PROXY: boolean | string[] | ((address: string, hop: number) => boolean) =
   typeof TRUST_PROXY === "number"
     ? (() => {
@@ -46,13 +50,15 @@ const FASTIFY_TRUST_PROXY: boolean | string[] | ((address: string, hop: number) 
       })()
     : TRUST_PROXY;
 
-function parseTrustProxy(raw: string | undefined): TrustProxySetting {
+// setting: Fastify へ渡す前の解釈結果。invalid: 解釈できずに「信頼しない」へ倒した場合 true
+function parseTrustProxy(raw: string | undefined): { setting: TrustProxySetting; invalid: boolean } {
   const v = (raw ?? "").trim();
-  if (v === "" || v === "false") return false;
-  if (v === "true") return true;
+  const lower = v.toLowerCase();
+  if (lower === "" || lower === "false") return { setting: false, invalid: false };
+  if (lower === "true") return { setting: true, invalid: false };
   if (/^\d+$/.test(v)) {
     const hops = Number(v);
-    if (Number.isSafeInteger(hops)) return hops;
+    if (Number.isSafeInteger(hops)) return { setting: hops === 0 ? false : hops, invalid: false };
   }
   const list = v.split(",").map((s) => s.trim()).filter(Boolean);
   const isAddressOrCidr = (s: string) => {
@@ -62,11 +68,17 @@ function parseTrustProxy(raw: string | undefined): TrustProxySetting {
     if (family === 0) return false;
     return m[2] === undefined || Number(m[2]) <= (family === 4 ? 32 : 128);
   };
-  if (list.length > 0 && list.every(isAddressOrCidr)) return list;
-  throw new Error(
-    `環境変数 TRUST_PROXY の値が不正です: ${JSON.stringify(raw)}` +
-      "（true / false / 段数の数値 / カンマ区切りの IP・CIDR のいずれかを指定してください）"
-  );
+  // IP/CIDR は事前に検証する(不正な値を Fastify(proxy-addr)へ渡すと、生成時に例外で起動が止まるため)
+  if (list.length > 0 && list.every(isAddressOrCidr)) return { setting: list, invalid: false };
+  return { setting: false, invalid: true };
+}
+
+// 採用した trustProxy の解釈を1行で表す(起動時の info ログ用)
+function describeTrustProxy(s: TrustProxySetting): string {
+  if (s === true) return "all";
+  if (s === false) return "none";
+  if (typeof s === "number") return `hops=${s}`;
+  return `list=[${s.join(", ")}]`;
 }
 
 // ---- 認証試行の回数制限 ----
@@ -249,6 +261,14 @@ async function main() {
     },
   });
   appForShutdown = app;
+  if (TRUST_PROXY_PARSED.invalid) {
+    app.log.warn(
+      `環境変数 TRUST_PROXY の値 ${JSON.stringify(process.env.TRUST_PROXY)} を解釈できないため、` +
+        "「信頼しない」(未設定と同じ)として起動します。受け付ける書式: true / false(大文字小文字は問わない) / " +
+        "プロキシの段数(0 以上の整数。0 は信頼しない) / カンマ区切りの IP・CIDR(例: 10.0.0.0/8,127.0.0.1)"
+    );
+  }
+  app.log.info(`trustProxy: ${describeTrustProxy(TRUST_PROXY)}`);
   if (TRUST_PROXY === true) {
     app.log.warn(
       "TRUST_PROXY=true は X-Forwarded-For の左端(クライアントが自由に書ける値)を接続元として扱うため、" +
