@@ -1,8 +1,9 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { isIP } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import Fastify from "fastify";
+import Fastify, { LogController } from "fastify";
 import cors from "@fastify/cors";
 import cookie from "@fastify/cookie";
 import helmet from "@fastify/helmet";
@@ -15,14 +16,90 @@ import { prisma } from "./db.js";
 import { recoverOrphanedCrawls, getRunningCrawlId, cancelCrawl } from "./crawler/manager.js";
 import { registerCrawlRoutes } from "./routes/crawls.js";
 import { registerAnalysisRoutes } from "./routes/analysis.js";
-import { registerExportRoutes } from "./routes/export.js";
+import { registerExportRoutes, cleanupExportTmpDir } from "./routes/export.js";
 
 const PORT = Number(process.env.PORT || 3001);
 
 // リバースプロキシ(Nginx/Caddy等)の背後で動かす場合、X-Forwarded-For を信頼して
 // クライアントの実IPをレート制限などに反映させる必要がある。直接公開する構成では
 // 任意のクライアントが X-Forwarded-For を偽装できてしまうため、明示的にオプトインさせる。
-const TRUST_PROXY = process.env.TRUST_PROXY === "true";
+// 指定できる値(Fastify の trustProxy にそのまま渡す):
+//  - 未設定・空・"false": 信頼しない(request.ip は接続元。プロキシ配下では全員がプロキシのIPに見える)
+//  - "true": すべての段を信頼する(request.ip は X-Forwarded-For の左端 = クライアントが自由に書ける値。
+//            レート制限のキーを偽装で変えられるため非推奨。従来からの挙動なので互換のため残す)
+//  - 数値(例 "1"): 接続元から数えて信頼するプロキシの段数。request.ip は X-Forwarded-For の右から
+//            その段数ぶん遡った値になり、クライアントが左側に書き足した値は無視される(推奨)
+//  - カンマ区切りの IP/CIDR(例 "10.0.0.0/8,127.0.0.1"): その範囲からの接続だけをプロキシとして信頼する
+//  - "true"/"false" は大文字小文字と前後の空白を無視する。"0" は「信頼しない」
+//  - 上記以外(解釈できない値)は、起動を止めずに従来どおり「信頼しない」として起動し、warn を1行出す
+//    (本番の現在値が分からないまま、デプロイした瞬間に起動しなくなる事故を避けるため)
+//  - 最終的に採用した解釈は起動時に info で1行出す(デプロイ直後にログで確認できるように)
+// 注意(段数指定): Fastify 5.12 系は trustProxy に数値を渡すと「何も信頼しない」扱いにする
+// (直接つながったクライアントが段数ぶんの X-Forwarded-For を書けば偽装できるため、安全側に倒す仕様)。
+// そのため段数は「接続元から数えて n 段目までを信頼する」関数に変換して渡す(proxy-addr / Express の
+// 段数指定と同じ意味)。これが安全なのは、アプリへの接続が必ずそのプロキシを経由する(インターネットから
+// コンテナへ直接つながらない)構成の場合に限る。Railway のように公開経路がエッジプロキシだけの構成を想定。
+type TrustProxySetting = boolean | number | string[];
+const TRUST_PROXY_PARSED = parseTrustProxy(process.env.TRUST_PROXY);
+const TRUST_PROXY: TrustProxySetting = TRUST_PROXY_PARSED.setting;
+const FASTIFY_TRUST_PROXY: boolean | string[] | ((address: string, hop: number) => boolean) =
+  typeof TRUST_PROXY === "number"
+    ? (() => {
+        const hops = TRUST_PROXY;
+        return (_address: string, hop: number) => hop < hops;
+      })()
+    : TRUST_PROXY;
+
+// setting: Fastify へ渡す前の解釈結果。invalid: 解釈できずに「信頼しない」へ倒した場合 true
+function parseTrustProxy(raw: string | undefined): { setting: TrustProxySetting; invalid: boolean } {
+  const v = (raw ?? "").trim();
+  const lower = v.toLowerCase();
+  if (lower === "" || lower === "false") return { setting: false, invalid: false };
+  if (lower === "true") return { setting: true, invalid: false };
+  if (/^\d+$/.test(v)) {
+    const hops = Number(v);
+    if (Number.isSafeInteger(hops)) return { setting: hops === 0 ? false : hops, invalid: false };
+  }
+  const list = v.split(",").map((s) => s.trim()).filter(Boolean);
+  const isAddressOrCidr = (s: string) => {
+    const m = /^([^/]+)(?:\/(\d{1,3}))?$/.exec(s);
+    if (!m) return false;
+    const family = isIP(m[1]);
+    if (family === 0) return false;
+    return m[2] === undefined || Number(m[2]) <= (family === 4 ? 32 : 128);
+  };
+  // IP/CIDR は事前に検証する(不正な値を Fastify(proxy-addr)へ渡すと、生成時に例外で起動が止まるため)
+  if (list.length > 0 && list.every(isAddressOrCidr)) return { setting: list, invalid: false };
+  return { setting: false, invalid: true };
+}
+
+// 採用した trustProxy の解釈を1行で表す(起動時の info ログ用)
+function describeTrustProxy(s: TrustProxySetting): string {
+  if (s === true) return "all";
+  if (s === false) return "none";
+  if (typeof s === "number") return `hops=${s}`;
+  return `list=[${s.join(", ")}]`;
+}
+
+// ---- 認証試行の回数制限 ----
+// Basic 認証の総当たり対策。全体のレート制限(120回/分)はルート単位のフックとして認証(アプリ全体の
+// onRequest フック)より後に実行されるため、認証に失敗したリクエストは数えられない。そこで認証の
+// validate の中で、認証試行専用のリミッターを使う:
+//  - 資格情報付きのリクエストは、照合の前に必ず1回数える(並列に大量に送られても、加算は照合より前に
+//    同期的に行われるため、上限を超えた分は照合されない)。照合に成功したら1回分を返す(refund)ので、
+//    数として残るのは失敗した試行(と処理中の試行)だけになる
+//  - 上限を超えている間は、正しい資格情報でも 429 を返す(超過中に正解を当てても成否が分からないようにする)
+//  - Authorization ヘッダが無い/形式が不正なリクエスト(ブラウザの初回アクセス等)は validate が呼ばれないので数えない
+// 上限値の根拠: 正規の利用者がパスワードを打ち間違える回数(数回)より十分大きく、かつ総当たりの速度を
+// 1つのIP(IPv6 は /64)あたり 15分に20回(1日 2,000回弱)まで落とす。パスワード自体は高エントロピーの
+// ランダム値を前提としており、この制限はパスワードが弱かった場合や漏えい時の試行を遅らせる多層防御。
+// カウンタはプロセスのメモリ上にあるため、再起動(Serverless のスリープ・再デプロイ)で消える。
+// IP の判定は TRUST_PROXY の設定に依存する(上記。誤っていると全員が同じ枠を共有するか、偽装で回避される)。
+const AUTH_FAIL_MAX = 20;
+const AUTH_FAIL_WINDOW = "15 minutes";
+const AUTH_FAIL_MESSAGE = "認証の試行回数が上限を超えました。しばらく時間をおいてから再度お試しください。";
+// 上限超過の warn ログはキー(IP)ごとに時間枠あたり1回だけ出す(超過後の大量の試行でログが溢れないように)
+const authExceededLogged = new Map<string, number>(); // キー → この時刻までは再度出さない
 
 // フロントエンド(Viteビルド成果物)を同一オリジンから配信するための静的ファイルディレクトリ。
 // 別オリジン配信(2サービス構成)だとセッションCookieがサードパーティCookie扱いとなり、
@@ -137,6 +214,8 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
       if (!closed) console.warn("[shutdown] HTTP サーバーのクローズ待ちを打ち切りました(SSE 等の接続が残っていたため)");
     };
     await Promise.all([waitCrawl(), closeHttp()]);
+    // このプロセスの xlsx 一時ディレクトリを消す(送信中のファイルがあっても、Linux では開いている間は読める)
+    await cleanupExportTmpDir();
     await prisma.$disconnect();
   } catch (err) {
     console.error("[shutdown] 終了処理中にエラーが発生しました:", err);
@@ -157,42 +236,101 @@ async function main() {
   // Fastify 標準のリクエストログは無効化し、/api/* のみ同等の内容("incoming request" /
   // "request completed")を下のフックで出力する。
   // 注意: disableRequestLogging は標準エラーハンドラのエラーログ(5xx のスタック等)も止めるため、
-  // 5xx の原因は下の onError フックで別途出力する。
+  // 5xx の原因は下の setErrorHandler で別途出力する。
+  // (Fastify 5 ではトップレベルの disableRequestLogging オプションが非推奨(FSTDEP023)になったため、
+  //  同じ設定を LogController 経由で渡す)
   // frameworkErrors: ルーティング前に検出される不正なURL(デコードできないパーセントエンコード等)を
-  // 一律 400 で閉じる。Fastify 4 の既定でも 400 だが、エラー本文にリクエストパスをそのまま埋め込むため
+  // 一律 400 で閉じる。Fastify の既定でも 400 だが、エラー本文にリクエストパスをそのまま埋め込むため
   // 固定文言にしておく。この時点では認証(onRequest)より前なので、未認証者にも同じ 400 が返る。
-  // (ルートが1つも無いメソッドの不正URLはここを通らず not-found ハンドラーへ直行する。
-  //  そちらの対策は下の setNotFoundHandler 参照)
+  // (Fastify 4 では、ルートが1つも無いメソッドの不正URLはここを通らず not-found ハンドラーへ直行していた。
+  //  Fastify 5.12.2 以降は not-found 用のルーターも不正URLをここへ回す。下の setNotFoundHandler 参照)
+  // パスパラメーターが上限長(maxParamLength、既定 100 文字)を超える場合(FST_ERR_MAX_PARAM_LENGTH)も
+  // ここへ来ることがある。ただしルーターは「他に一致するルートが無いとき」にだけこのエラーにするため、
+  // 静的配信のワイルドカード(GET/HEAD /*)がある GET/HEAD では到達せず、認証後に通常の 404 になる
+  // (未認証なら 401)。到達するのは PATCH/DELETE/POST など、ワイルドカードの無いメソッドのとき。
+  // 認証より前に返るため、未認証者に返す応答の種類を増やさないよう不正URLと同じ 400 にそろえる。
   const app = Fastify({
     logger: true,
-    trustProxy: TRUST_PROXY,
-    disableRequestLogging: true,
+    trustProxy: FASTIFY_TRUST_PROXY,
+    logController: new LogController({ disableRequestLogging: true }),
     frameworkErrors: (err: FastifyError, _req: FastifyRequest, reply: FastifyReply) => {
-      if (err.code === "FST_ERR_BAD_URL") return reply.code(400).send({ error: "bad request" });
+      if (err.code === "FST_ERR_BAD_URL" || err.code === "FST_ERR_MAX_PARAM_LENGTH") {
+        return reply.code(400).send({ error: "bad request" });
+      }
       return reply.code(500).send({ error: "internal server error" });
     },
   });
   appForShutdown = app;
+  if (TRUST_PROXY_PARSED.invalid) {
+    app.log.warn(
+      `環境変数 TRUST_PROXY の値 ${JSON.stringify(process.env.TRUST_PROXY)} を解釈できないため、` +
+        "「信頼しない」(未設定と同じ)として起動します。受け付ける書式: true / false(大文字小文字は問わない) / " +
+        "プロキシの段数(0 以上の整数。0 は信頼しない) / カンマ区切りの IP・CIDR(例: 10.0.0.0/8,127.0.0.1)"
+    );
+  }
+  app.log.info(`trustProxy: ${describeTrustProxy(TRUST_PROXY)}`);
+  if (TRUST_PROXY === true) {
+    app.log.warn(
+      "TRUST_PROXY=true は X-Forwarded-For の左端(クライアントが自由に書ける値)を接続元として扱うため、" +
+        "偽装でレート制限・認証試行の制限を回避され得ます。プロキシの段数(例: TRUST_PROXY=1)での指定を推奨します"
+    );
+  }
   const isApiRequest = (url: string) => url === "/api" || url.startsWith("/api/") || url.startsWith("/api?");
+  // 401/429 のログ行に付ける接続元の情報。TRUST_PROXY に設定すべき値(プロキシの段数)を本番のログから
+  // 判断できるよう、Fastify が採用した ip、信頼した経路 ips(TRUST_PROXY 未設定なら null)、
+  // 生の X-Forwarded-For、実際の接続元(socket)を並べて出す。通常の成功リクエストには付けない。
+  const clientAddressInfo = (req: FastifyRequest) => {
+    const xff = req.headers["x-forwarded-for"];
+    return {
+      ip: req.ip,
+      ips: req.ips ?? null,
+      xForwardedFor: typeof xff === "string" ? xff.slice(0, 512) : (xff ?? null),
+      remoteAddress: req.socket?.remoteAddress ?? null,
+    };
+  };
   // レート制限・Basic認証より前に登録し、それらで弾かれたAPIリクエストも従来どおり記録する
   app.addHook("onRequest", async (req) => {
     if (isApiRequest(req.url)) req.log.info({ req }, "incoming request");
   });
-  // 5xx になる例外は(パスを問わず)スタック付きで記録する。4xx(認証失敗・バリデーション等)は
-  // 想定内の応答なので、上下のフックの1行ログに任せる。
-  app.addHook("onError", async (req, _reply, err) => {
-    const statusCode = (err as { statusCode?: number }).statusCode ?? 500;
-    if (statusCode >= 500) req.log.error({ req, err }, err.message);
-  });
   app.addHook("onResponse", async (req, reply) => {
+    const authRelated = reply.statusCode === 401 || reply.statusCode === 429;
     if (isApiRequest(req.url)) {
-      reply.log.info({ res: reply, responseTime: reply.elapsedTime }, "request completed");
-    } else if (reply.statusCode === 401) {
-      // /api 以外（SPA 本体・静的ファイル）への Basic 認証失敗も、総当たり等を検知できるよう1行だけ記録する。
+      if (authRelated) {
+        // 認証失敗・回数制限は総当たりの検知とプロキシ段数の確認に使うため warn で接続元の情報を付ける
+        reply.log.warn({ res: reply, responseTime: reply.elapsedTime, ...clientAddressInfo(req) }, "request completed");
+      } else {
+        reply.log.info({ res: reply, responseTime: reply.elapsedTime }, "request completed");
+      }
+    } else if (authRelated) {
+      // /api 以外（SPA 本体・静的ファイル）への Basic 認証失敗・回数制限も、総当たり等を検知できるよう1行だけ記録する。
       // ブラウザは資格情報の入力前に一度 401 を受け取るため、通常の初回アクセスでも1行出る。
       // 認証に成功した静的ファイルの通常アクセスは従来どおり記録しない。
-      reply.log.warn({ req, res: reply }, "unauthorized (non-api)");
+      reply.log.warn(
+        { req, res: reply, ...clientAddressInfo(req) },
+        reply.statusCode === 401 ? "unauthorized (non-api)" : "too many requests (non-api)"
+      );
     }
+  });
+  // エラー応答。4xx(認証失敗・回数制限・入力不正等)は Fastify 標準のエラーハンドラーへそのまま渡し、
+  // 応答の形(本文・WWW-Authenticate・Retry-After 等のヘッダ)を変えない。
+  // 5xx は内部の情報(ファイルパス・SQL 等)を含み得る err.message を返さず固定文言にし、
+  // 詳細はスタック付きでログにだけ出す(パスを問わず。標準のエラーログは disableRequestLogging で
+  // 止まっているため、ここが 5xx の唯一の記録になる)。
+  app.setErrorHandler((err: FastifyError, req, reply) => {
+    let statusCode = reply.statusCode >= 400 ? reply.statusCode : 500;
+    if (reply.statusCode < 400) {
+      if (err.statusCode && err.statusCode >= 400 && err.statusCode <= 599) statusCode = err.statusCode;
+      else {
+        const status = (err as { status?: number }).status;
+        if (status && status >= 400 && status <= 599) statusCode = status;
+      }
+    }
+    if (statusCode < 500) {
+      reply.send(err); // 親(標準)のエラーハンドラーで従来どおりの応答にする
+      return;
+    }
+    req.log.error({ req, err }, err.message);
+    reply.code(statusCode).type("application/json; charset=utf-8").send({ error: "internal server error" });
   });
 
   // レスポンス圧縮(br/gzip)。JSON(ページ一覧等)・JS/CSS の転送量を削減する。
@@ -212,6 +350,9 @@ async function main() {
   await app.register(cors, {
     origin: CORS_ORIGINS,
     credentials: true,
+    // @fastify/cors v11 で既定の許可メソッドが CORS セーフリストのメソッド(GET/HEAD/POST)のみに変わったため、
+    // 従来の既定値(このアプリが使う PATCH/DELETE を含む)を明示する。
+    methods: "GET,HEAD,PUT,PATCH,POST,DELETE",
   });
   await app.register(cookie);
   await app.register(rateLimit, {
@@ -224,12 +365,40 @@ async function main() {
   // ID/PASSWORDダイアログで認証する。一度入力すればブラウザが資格情報を
   // 保持して以後のリクエストへ自動付与するため、独自のログイン画面・
   // セッション管理(DB)が不要になる。
-  // ブルートフォース耐性は「グローバルのレート制限」と「高エントロピーな
-  // ランダムパスワード」の組み合わせで担保する(失敗試行を専用にロックする
-  // ような仕組みは、本ツールの利用規模に対して過剰と判断)。
+  // ブルートフォース耐性は「高エントロピーなランダムパスワード」と「認証試行の回数制限」
+  // (IP ごとに失敗20回/15分。ファイル先頭の AUTH_FAIL_MAX 参照)の組み合わせで担保する。
+  // (以前は全体のレート制限で担保しているつもりだったが、全体のレート制限はルート単位のフックとして
+  //  認証の後に実行されるため、認証に失敗したリクエストは数えられていなかった)
+  // 全体のレート制限を認証より前のアプリ全体のフックへ移す方法は採らない: @fastify/rate-limit は
+  // 「このリクエストは数えた」というフラグを共有するため、ルート個別の厳しい制限(クロール開始 5回/分等)
+  // が黙って無効になる。createRateLimit で作るリミッターはこのフラグに触れない。
+  const authAttemptLimit = app.createRateLimit({ max: AUTH_FAIL_MAX, timeWindow: AUTH_FAIL_WINDOW });
   await app.register(basicAuth, {
-    validate: async (username, password) => {
-      if (safeCompare(username, BASIC_AUTH_USER) && safeCompare(password, BASIC_AUTH_PASSWORD)) return;
+    // 通常の onRequest フックからも、not-found ハンドラー内の自前の検証(checkBasicAuth)からも呼ばれる。
+    // どちらの経路でも同じカウンタで数える。
+    validate: async (username, password, req, reply) => {
+      const rl = await authAttemptLimit(req); // 照合の前に1回数える
+      if (!rl.isAllowed && rl.isExceeded) {
+        const now = Date.now();
+        if ((authExceededLogged.get(rl.key) ?? 0) <= now) {
+          authExceededLogged.set(rl.key, now + rl.ttl);
+          if (authExceededLogged.size > 10_000) {
+            for (const [k, until] of authExceededLogged) if (until <= now) authExceededLogged.delete(k);
+          }
+          // 資格情報(ユーザー名を含む)は出さない
+          req.log.warn(
+            { ip: req.ip, key: rl.key, attempts: rl.max + 1, limit: rl.max, retryAfterSec: rl.ttlInSeconds },
+            "認証試行の回数制限を超えました(以後この時間枠では同じ接続元の超過を記録しません)"
+          );
+        }
+        reply.header("Retry-After", String(rl.ttlInSeconds));
+        // statusCode が 401 以外なので @fastify/basic-auth は WWW-Authenticate を付けない
+        return Object.assign(new Error(AUTH_FAIL_MESSAGE), { statusCode: 429 });
+      }
+      if (safeCompare(username, BASIC_AUTH_USER) && safeCompare(password, BASIC_AUTH_PASSWORD)) {
+        if (!rl.isAllowed) await authAttemptLimit(req, { refund: true }); // 成功した試行は数から外す
+        return;
+      }
       return new Error("unauthorized");
     },
     authenticate: { realm: "SiteCrawlerAI" },
@@ -253,25 +422,37 @@ async function main() {
   await app.register(staticPlugin, {
     root: PUBLIC_DIR,
     index: false,
-    setHeaders: (res, filePath) => {
+    // 末尾が「/」のパス(「/」自体や「/assets/」などのディレクトリ)はファイルとして配信しない。
+    // @fastify/static v10 では index:false のディレクトリ要求が 403 になるため、ここで除外して
+    // 従来どおり not-found ハンドラー(SPAフォールバック)へ回す。
+    allowedPath: (pathName) => !pathName.endsWith("/"),
+    // ドットで始まるファイル・ディレクトリ(.env 等)は配信しない。@fastify/static の既定は "allow"。
+    // "ignore" は「存在しない」扱いになり、not-found ハンドラー(SPAフォールバック)へ回る。
+    dotfiles: "ignore",
+    // @fastify/static v10 以降、setHeaders には生の http.ServerResponse ではなく FastifyReply が渡され、
+    // 既定の Cache-Control 等を設定した後に呼ばれる(ここで設定した値が既定値を上書きする)。
+    setHeaders: (reply, filePath) => {
       if (filePath.startsWith(ASSETS_DIR)) {
-        res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+        reply.header("Cache-Control", "public, max-age=31536000, immutable");
       } else if (path.basename(filePath) === "index.html") {
-        res.setHeader("Cache-Control", "no-cache");
+        reply.header("Cache-Control", "no-cache");
       }
     },
   });
   // SPAフォールバック兼 404 応答。
-  // 注意(CVE-2026-76169 / GHSA-p68q-wchp-6fh7): Fastify 4 では「ルートが1つも登録されていないメソッド」
-  // (PUT 等)で不正なURLが来ると、このハンドラーが onRequest / preHandler フックを一切通らずに直接呼ばれる
-  // (= 上の Basic 認証フックがスキップされる)。v4 系には修正版が無いため、このハンドラー自体を
-  // 「ライフサイクル外から呼ばれても安全」に作る:
+  // 経緯(CVE-2026-76169 / GHSA-p68q-wchp-6fh7): Fastify 4 では「ルートが1つも登録されていないメソッド」
+  // (PUT 等)で不正なURLが来ると、このハンドラーが onRequest / preHandler フックを一切通らずに直接呼ばれ
+  // (= 上の Basic 認証フックがスキップされる)、プロセスが落ちることもあった。
+  // Fastify 5.12.2 以降で修正済み(そうした不正URLは上の frameworkErrors で 400 になり、ここへは来ない)だが、
+  // 将来の同種の不具合に備えた多層防御として、このハンドラー自体を「ライフサイクル外から呼ばれても安全」に
+  // 作る方針は維持する:
   //  - 冒頭で Basic 認証を自前で検証する(検証は @fastify/basic-auth の app.basicAuth をそのまま呼び、
-  //    ヘッダの解釈・validate・401 応答の形を通常経路と共有する。通常経路では認証済みなので二重検証になるが無害)
-  //  - reply.sendFile 等のプラグインのデコレーターに依存しない(その経路の reply には付いておらず、
+  //    ヘッダの解釈・validate・401 応答の形を通常経路と共有する。通常経路では onRequest で認証済みのため
+  //    二重検証になるが、未認証のリクエストは onRequest の 401 で打ち切られてここへ来ないので、401 が
+  //    二重に送られることはない)
+  //  - reply.sendFile 等のプラグインのデコレーターに依存しない(v4 のその経路の reply には付いておらず、
   //    呼ぶと未捕捉の TypeError でプロセスごと落ちていた)
-  //  - 例外を外へ投げない(その経路では Fastify が例外を捕捉しないため)
-  // 恒久対応は Fastify 5.12.2 以上への更新。
+  //  - 例外を外へ投げない(v4 のその経路では Fastify が例外を捕捉しなかったため)
   app.setNotFoundHandler((req, reply) => {
     handleNotFound(app, req, reply).catch((err) => {
       req.log.error({ err }, "not-found handler failed");
@@ -302,8 +483,9 @@ async function loadIndexHtml(): Promise<{ body: string; etag: string } | null> {
   return indexHtml;
 }
 
-// @fastify/basic-auth の検証(app.basicAuth)を Promise 化したもの。失敗時はその Error(statusCode 401、
-// WWW-Authenticate ヘッダは設定済み)を返し、成功時は undefined。
+// @fastify/basic-auth の検証(app.basicAuth)を Promise 化したもの。失敗時はその Error(statusCode 401 で
+// WWW-Authenticate ヘッダ設定済み、または認証試行の回数制限による statusCode 429 で Retry-After 設定済み)
+// を返し、成功時は undefined。
 function checkBasicAuth(app: FastifyInstance, req: FastifyRequest, reply: FastifyReply): Promise<Error | undefined> {
   return new Promise((resolve) => {
     app.basicAuth(req, reply, (err?: Error) => resolve(err ?? undefined));
@@ -326,7 +508,7 @@ async function handleNotFound(app: FastifyInstance, req: FastifyRequest, reply: 
   //    (未認証者に与える情報を増やさないため)。
   const authErr = await checkBasicAuth(app, req, reply);
   if (authErr) {
-    // 通常経路と同じ標準エラーハンドラーで 401 を返す(本文・ステータス・onResponse の 401 ログが揃う)
+    // 通常経路と同じエラーハンドラーで 401/429 を返す(本文・ステータス・onResponse の 401/429 ログが揃う)
     reply.send(authErr);
     return;
   }

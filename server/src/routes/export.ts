@@ -1,5 +1,4 @@
-import { createReadStream } from "node:fs";
-import { mkdir, readdir, rm, stat } from "node:fs/promises";
+import { mkdir, open, readdir, rm, rmdir, stat, type FileHandle } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
@@ -144,7 +143,14 @@ async function withExportSlot(reply: FastifyReply, fn: (slot: ExportSlot) => Pro
 
 // xlsx を書き出す一時ファイルの置き場所。xlsx はメモリ上で組み立てず一時ファイルへ書き出してから送る
 // （書き出しの途中で失敗した場合に、ヘッダー送信前なので通常のエラー応答を返せるため）。
-const EXPORT_TMP_DIR = path.join(os.tmpdir(), "sitecrawler-export");
+// ディレクトリはプロセスごとに分ける。以前は全プロセス共通の「sitecrawler-export」を起動時に丸ごと
+// 空にしていたため、同じ一時ディレクトリを使う別のサーバープロセス（開発機で複数起動した場合など）が
+// 起動すると、書き出し中・送信直前のファイルが消されてエクスポートが 500 になっていた。
+const EXPORT_TMP_PREFIX = "sitecrawler-export";
+const EXPORT_TMP_DIR = path.join(os.tmpdir(), `${EXPORT_TMP_PREFIX}-${process.pid}`);
+// 他プロセスのディレクトリ（と旧版の共通ディレクトリ）の残骸を掃除する際、これより新しいものは
+// 使用中の可能性があるため触らない。xlsx の書き出しは数秒〜数十秒で、書き出し中はファイルの更新時刻が進む。
+const EXPORT_TMP_STALE_MS = 60 * 60 * 1000;
 
 async function removeQuietly(file: string): Promise<void> {
   try {
@@ -154,8 +160,36 @@ async function removeQuietly(file: string): Promise<void> {
   }
 }
 
-// 起動時に、前回プロセスが異常終了して残した一時ファイルを削除する（1プロセス構成のため、
-// 起動時点で使用中の一時ファイルは存在しない）
+// 更新時刻が olderThan より前のファイルだけを消し、ディレクトリ自体も古くて空なら消す
+async function removeStaleFiles(dir: string, olderThan: number): Promise<void> {
+  // ディレクトリが古いかどうかは中のファイルを消す前に判定する（消すとディレクトリの更新時刻が進むため）。
+  // 使用中のプロセスはファイルを作る・消すたびにディレクトリの更新時刻が進むため、古いものだけを対象にする
+  let dirIsStale = false;
+  try {
+    dirIsStale = (await stat(dir)).mtimeMs < olderThan;
+  } catch {
+    return;
+  }
+  for (const name of await readdir(dir)) {
+    const file = path.join(dir, name);
+    try {
+      const st = await stat(file);
+      if (st.isFile() && st.mtimeMs < olderThan) await removeQuietly(file);
+    } catch {
+      // 調べている間に持ち主のプロセスが消した場合など。無視する
+    }
+  }
+  try {
+    if (dirIsStale) await rmdir(dir); // 空でなければ失敗する（無視）
+  } catch {
+    // 空でない・既に無い等。無視する
+  }
+}
+
+// 起動時の掃除。
+//  - 自分のディレクトリ（同じ pid の過去のプロセスの残骸。コンテナでは pid が毎回 1 になる）は中身を全部消す。
+//    同じ pid のプロセスが同じ一時ディレクトリで同時に動くことは無いため、使用中のファイルは存在しない
+//  - 他のプロセスのディレクトリと旧版の共通ディレクトリは、十分に古い（1時間以上更新の無い）残骸だけを消す
 async function sweepTmpDir(): Promise<void> {
   try {
     await mkdir(EXPORT_TMP_DIR, { recursive: true });
@@ -163,6 +197,33 @@ async function sweepTmpDir(): Promise<void> {
   } catch (err: any) {
     console.error("[export] 一時ディレクトリの準備に失敗しました:", err?.message || err);
   }
+  try {
+    const olderThan = Date.now() - EXPORT_TMP_STALE_MS;
+    const ownName = path.basename(EXPORT_TMP_DIR);
+    for (const ent of await readdir(os.tmpdir(), { withFileTypes: true })) {
+      if (!ent.isDirectory() || ent.name === ownName) continue;
+      if (ent.name !== EXPORT_TMP_PREFIX && !/^sitecrawler-export-\d+$/.test(ent.name)) continue;
+      await removeStaleFiles(path.join(os.tmpdir(), ent.name), olderThan);
+    }
+  } catch (err: any) {
+    console.error("[export] 古い一時ファイルの掃除に失敗しました:", err?.message || err);
+  }
+}
+
+// 終了処理から呼ぶ。このプロセスの一時ディレクトリを消す（失敗してもログのみ）
+export async function cleanupExportTmpDir(): Promise<void> {
+  try {
+    await rm(EXPORT_TMP_DIR, { recursive: true, force: true });
+  } catch (err: any) {
+    console.error("[export] 一時ディレクトリの削除に失敗しました:", err?.message || err);
+  }
+}
+
+// エクスポートは GET でだけ受け付ける。Fastify は GET ルートに HEAD を自動で付けるが、HEAD でも
+// ハンドラー全体（DB の読み出し・xlsx の書き出し）が走ってしまうため、HEAD は処理せず 405 を返す
+// （フロントは GET の fetch でしか呼ばない）。
+function rejectHead(reply: FastifyReply) {
+  return reply.code(405).header("Allow", "GET").send({ error: "method not allowed" });
 }
 
 // loadSource の結果のうち、出力できないもの（404 / 409）を応答する。出力可能なら null
@@ -181,6 +242,7 @@ export async function registerExportRoutes(app: FastifyInstance) {
 
   // まとめて Excel（複数シート）
   app.get("/api/crawls/:id/export.xlsx", async (req, reply) => {
+    if (req.method === "HEAD") return rejectHead(reply);
     const { id } = req.params as { id: string };
     const q = req.query as { datasets?: string };
     let keys = ALL_DATASET_KEYS;
@@ -227,8 +289,21 @@ export async function registerExportRoutes(app: FastifyInstance) {
       await removeQuietly(file);
       return reply;
     }
-    const { size } = await stat(file);
-    const body = createReadStream(file);
+    // 先にファイルを開いてから、開いたハンドルでサイズを調べて送る（パスで stat してから開き直すと、
+    // その間にファイルが消された場合に食い違うため）。開いた後はパスが消されても内容は読める。
+    // ここでの失敗（ファイルが消された等）はヘッダー送信前なので、内部のパスを含まない固定文言で返す。
+    let fh: FileHandle | undefined;
+    let size: number;
+    try {
+      fh = await open(file, "r");
+      size = (await fh.stat()).size;
+    } catch (err: any) {
+      req.log.error({ err }, "[export] 書き出した xlsx の一時ファイルを開けませんでした");
+      await fh?.close().catch(() => {});
+      await removeQuietly(file);
+      return reply.code(500).send({ error: "エクスポートファイルの準備に失敗しました。もう一度お試しください。" });
+    }
+    const body = fh.createReadStream(); // 読み終わり・破棄時にハンドルも閉じる（autoClose）
     // 送信完了・切断・読み込みエラーのいずれでも一時ファイルを消す
     body.once("close", () => void removeQuietly(file));
     reply.raw.once("close", () => {
@@ -243,6 +318,7 @@ export async function registerExportRoutes(app: FastifyInstance) {
 
   // 個別 CSV（URL: /api/crawls/:id/export/<dataset>.csv）
   app.get("/api/crawls/:id/export/:datasetFile", async (req, reply) => {
+    if (req.method === "HEAD") return rejectHead(reply);
     const { id, datasetFile } = req.params as { id: string; datasetFile: string };
     const m = /^(.+)\.csv$/.exec(datasetFile);
     if (!m) return reply.code(400).send({ error: "expected <dataset>.csv" });
